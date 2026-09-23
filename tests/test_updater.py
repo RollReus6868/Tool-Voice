@@ -5,6 +5,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -271,9 +272,28 @@ class WindowsHelperTests(unittest.TestCase):
         deadline = time.time() + 240
         while time.time() < deadline:
             if log.exists() and "xong" in log.read_text(errors="replace"):
-                return log.read_text(errors="replace")
+                text = log.read_text(errors="replace")
+                # the app (sleeper) lives ~3 s: a helper that did not wait means the PID check is broken
+                m = re.search(r"sau (\d+) lan cho", text)
+                self.assertTrue(m and int(m.group(1)) >= 1, "helper did not wait for the app:\n" + text)
+                return text
             time.sleep(1)
-        self.fail("helper did not finish: " + (log.read_text(errors="replace") if log.exists() else "no log"))
+        self.fail("helper did not finish:\n" + self._diag(log))
+
+    @staticmethod
+    def _diag(log):
+        parts = [log.read_text(errors="replace") if log.exists() else "no log"]
+        setup_log = Path(str(log) + ".setup.txt")
+        if setup_log.exists():
+            parts.append("---- setup log (tail) ----\n" + "\n".join(
+                setup_log.read_text(errors="replace").splitlines()[-40:]))
+        parts.append("---- processes ----\n" + subprocess.run(
+            ["tasklist"], capture_output=True, text=True, errors="replace").stdout[-3000:])
+        # keep a copy for the workflow's diagnostic artifact
+        if os.environ.get("RUNNER_TEMP"):
+            dest = Path(os.environ["RUNNER_TEMP"]) / "update_helper_diag.txt"
+            dest.write_text("\n".join(parts), encoding="utf-8")
+        return "\n".join(parts)
 
     def test_portable_swap_unicode_folder(self):
         with tempfile.TemporaryDirectory() as td:
@@ -290,7 +310,7 @@ class WindowsHelperTests(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("TTS_CI_SETUP_EXE"), "needs the built setup.exe")
     def test_setup_silent_update(self):
-        setup = Path(os.environ["TTS_CI_SETUP_EXE"])
+        setup = Path(os.environ["TTS_CI_SETUP_EXE"]).resolve()   # the helper runs in another folder
         with tempfile.TemporaryDirectory() as td:
             app_dir = Path(td) / "Cài đặt" / "TTS Clone Studio"
             r = subprocess.run([str(setup), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", f"/DIR={app_dir}"],

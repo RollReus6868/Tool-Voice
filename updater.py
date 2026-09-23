@@ -252,10 +252,17 @@ def windows_script(kind: str) -> str:
     TTS_NEW, TTS_TARGET, TTS_LOG): the environment block is UTF-16, so folders
     with Vietnamese names survive, while the script itself stays pure ASCII.
     Only goto (no parenthesised blocks) so %VAR% expands live; ping instead of
-    `timeout`, which fails when there is no console."""
+    `timeout`, which fails when there is no console.
+    System tools are called by full path: when Git's usr\\bin is on PATH (Git Bash,
+    CI runners, some user setups) a bare `find` is the Unix find, the PID check
+    always fails and the helper stops waiting for the app.
+    The installer is run directly, not through `start`: a batch file waits for
+    GUI programs anyway, and `start` pops a blocking \"Windows cannot find\" dialog
+    when the file is missing."""
     lines = [
         "@echo off",
         "setlocal EnableExtensions",
+        'set "SYS=%SystemRoot%\\System32"',
         'set "PID=%TTS_PID%"',
         'set "NEW=%TTS_NEW%"',
         'set "TARGET=%TTS_TARGET%"',
@@ -263,11 +270,11 @@ def windows_script(kind: str) -> str:
         'echo [%date% %time%] bat dau cap nhat >> "%LOG%"',
         "set /a N=0",
         ":wait",
-        'tasklist /FI "PID eq %PID%" /NH 2>nul | find " %PID% " >nul',
+        '"%SYS%\\tasklist.exe" /FI "PID eq %PID%" /NH 2>nul | "%SYS%\\find.exe" " %PID% " >nul',
         "if errorlevel 1 goto gone",
         "set /a N+=1",
         "if %N% GEQ 120 goto gone",
-        "ping -n 2 127.0.0.1 >nul",
+        '"%SYS%\\PING.EXE" -n 2 127.0.0.1 >nul',
         "goto wait",
         ":gone",
         'echo [%date% %time%] app da thoat sau %N% lan cho >> "%LOG%"',
@@ -276,8 +283,13 @@ def windows_script(kind: str) -> str:
         lines += [
             'for %%I in ("%TARGET%") do set "DIR=%%~dpI"',
             'if "%DIR:~-1%"=="\\" set "DIR=%DIR:~0,-1%"',
-            'start "" /wait "%NEW%" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /DIR="%DIR%" /LOG="%LOG%.setup.txt"',
+            'if not exist "%NEW%" goto nosetup',
+            'echo [%date% %time%] chay bo cai >> "%LOG%"',
+            '"%NEW%" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /DIR="%DIR%" /LOG="%LOG%.setup.txt"',
             'echo [%date% %time%] setup ket thuc, ma %errorlevel% >> "%LOG%"',
+            "goto launch",
+            ":nosetup",
+            'echo [%date% %time%] KHONG thay bo cai >> "%LOG%"',
         ]
     else:
         lines += [
@@ -287,7 +299,7 @@ def windows_script(kind: str) -> str:
             "if not errorlevel 1 goto moved",
             "set /a T+=1",
             "if %T% GEQ 30 goto movefail",
-            "ping -n 2 127.0.0.1 >nul",
+            '"%SYS%\\PING.EXE" -n 2 127.0.0.1 >nul',
             "goto move",
             ":movefail",
             'echo [%date% %time%] KHONG thay duoc file - dang bi khoa >> "%LOG%"',
@@ -351,6 +363,9 @@ def launch_helper(kind: str, *, new_path: str, target: str, log: str, staging: s
     """Write the helper script and start it detached. Returns the script path.
     The caller must quit the app right after."""
     pid = pid or os.getpid()
+    # the helper runs with its own temp folder as working dir: relative paths would break
+    new_path, target, log = (os.path.abspath(x) for x in (new_path, target, log))
+    staging = os.path.abspath(staging) if staging else ""
     tmp = Path(tempfile.mkdtemp(prefix="tts_update_"))
     if kind in ("win-setup", "win-portable"):
         script = tmp / "cap_nhat.cmd"
