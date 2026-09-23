@@ -1,0 +1,14 @@
+# Windows scripts must keep CRLF, shell scripts LF, regardless of the committer's OS
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.iss  text eol=crlf
+*.sh   text eol=lf
+*.command text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf
+*.md   text eol=lf
+*.spec text eol=lf
+*.ico  binary
+*.icns binary
+*.png  binary
+*.xlsx binary

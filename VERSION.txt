@@ -1,0 +1,10 @@
+TTS Clone Studio 2.1.0
+
+2.1.0
+- Tu cap nhat qua GitHub Releases (kiem tra, tai, kiem SHA-256, cai, mo lai)
+- Bo cai Windows (Inno Setup, khong can quyen admin) + ban portable 1 file
+- Ban macOS .app cho Apple Silicon (arm64) va Intel (x64)
+- GitHub Actions: build + kiem thu tren Windows/macOS that, tu phat hanh Release
+
+2.0.0
+- Giao dien moi Sang/Toi, xuat MP4, batch Excel da luong, lay giong tu tai khoan

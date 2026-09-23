@@ -1,0 +1,361 @@
+# Build + test on real Windows / macOS machines, and publish a GitHub Release.
+#
+#  push to main / pull request  -> test + build all platforms (no release)
+#  Actions tab -> "Build & Release" -> Run workflow, tick "publish"  -> also creates Release v<APP_VERSION>
+#  push a tag v<APP_VERSION>     -> also creates the Release
+#
+# Release asset names are fixed; updater.py depends on them.
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths-ignore: ["**.md", "VERSION.txt"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish a GitHub Release v<APP_VERSION> after a green build"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  PYTHON_VERSION: "3.12"
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  TTS_NO_UPDATE_CHECK: "1"
+
+jobs:
+  # ------------------------------------------------------------------ 1. Linux: fast checks
+  test:
+    name: Kiem tra (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Doc phien ban
+        id: ver
+        run: |
+          v=$(python -c "import app_info; print(app_info.APP_VERSION)")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "APP_VERSION=$v"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "$v" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME khong khop APP_VERSION=$v trong app_info.py"
+            exit 1
+          fi
+
+      - name: Thu vien he thong cho Qt
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+
+      - name: Cai thu vien Python
+        run: python -m pip install -r requirements.txt
+
+      - name: Kiem tra tinh (dong xuong dong, ten file, spec)
+        run: python tools/check_repo.py
+
+      - name: Kiem thu logic
+        run: |
+          python self_test.py
+          python -m unittest discover -s tests -v
+
+      - name: Kiem thu giao dien + cap nhat
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python tests/smoke_gui.py -
+          python tests/update_gui_test.py
+
+  # ------------------------------------------------------------------ 2. Windows
+  windows:
+    name: Windows (setup + portable)
+    needs: test
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.test.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Cai thu vien
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Kiem thu tren Windows
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python self_test.py
+          python -m unittest discover -s tests -v
+          python tests/smoke_gui.py -
+          python tests/update_gui_test.py
+
+      - name: Dong goi onedir (cho bo cai)
+        env:
+          TTS_BUILD_MODE: onedir
+        run: python -m PyInstaller --noconfirm --clean TTSCloneStudio.spec
+
+      - name: Dong goi onefile (portable)
+        env:
+          TTS_BUILD_MODE: onefile
+        run: python -m PyInstaller --noconfirm --clean TTSCloneStudio.spec --distpath dist/onefile --workpath build/onefile
+
+      - name: Tu kiem tra app da dong goi
+        run: |
+          mkdir -p ci
+          python tools/ci_selfcheck.py dist/TTSCloneStudio/TTSCloneStudio.exe win-portable ci/onedir.json
+          python tools/ci_selfcheck.py dist/onefile/TTSCloneStudio.exe win-portable ci/onefile.json
+
+      - name: Cai Inno Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Find-Iscc {
+            @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe", "C:\InnoSetup\ISCC.exe") |
+              Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          $iscc = Find-Iscc
+          if (-not $iscc) {
+            Write-Host "Inno Setup not preinstalled - downloading 6.6.1 from GitHub"
+            $exe = Join-Path $env:RUNNER_TEMP 'innosetup.exe'
+            try {
+              Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_6_1/innosetup-6.6.1.exe' -OutFile $exe
+              $p = Start-Process $exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/ALLUSERS','/DIR=C:\InnoSetup' -Wait -PassThru
+              Write-Host "installer exit code $($p.ExitCode)"
+            } catch { Write-Host "GitHub download failed: $_" }
+            $iscc = Find-Iscc
+          }
+          if (-not $iscc) {
+            Write-Host "Falling back to Chocolatey"
+            choco install innosetup -y --no-progress
+            $iscc = Find-Iscc
+          }
+          if (-not $iscc) { throw "ISCC.exe not found after all install attempts" }
+          Write-Host "ISCC = $iscc"
+          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Tao bo cai dat
+        shell: pwsh
+        run: |
+          & $env:ISCC "/DAppVersion=$env:VERSION" "installer\TTSCloneStudio.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          Get-ChildItem dist\*.exe
+
+      - name: Thu cai dat im lang, tu kiem tra, go cai dat
+        shell: pwsh
+        run: |
+          $setup = "dist\TTSCloneStudio-$env:VERSION-windows-setup.exe"
+          $dir = Join-Path $env:RUNNER_TEMP 'install test\TTS Clone Studio'
+          $log = Join-Path $env:RUNNER_TEMP 'setup_log.txt'
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=`"$dir`"","/LOG=`"$log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content $log -Tail 40; throw "setup exit code $($p.ExitCode)" }
+          if (-not (Test-Path "$dir\TTSCloneStudio.exe")) { throw "app not installed" }
+          if (-not (Test-Path "$dir\unins000.exe")) { throw "uninstaller missing" }
+          python tools/ci_selfcheck.py "$dir\TTSCloneStudio.exe" win-setup ci/installed.json
+          if ($LASTEXITCODE -ne 0) { throw "self-check of installed app failed" }
+          $u = Start-Process "$dir\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+          for ($i = 0; $i -lt 60 -and (Test-Path "$dir\TTSCloneStudio.exe"); $i++) { Start-Sleep 1 }
+          if (Test-Path "$dir\TTSCloneStudio.exe") { throw "uninstall did not remove the app" }
+          Write-Host "install / self-check / uninstall OK"
+
+      - name: Kiem thu tu cap nhat that (cmd.exe + setup.exe)
+        run: |
+          TTS_CI_SETUP_EXE="$(cygpath -w "dist/TTSCloneStudio-$VERSION-windows-setup.exe")"
+          export TTS_CI_SETUP_EXE
+          python -m unittest discover -s tests -p "test_updater.py" -k WindowsHelperTests -v
+
+      - name: Gom file phat hanh
+        run: |
+          mkdir -p release
+          cp "dist/TTSCloneStudio-$VERSION-windows-setup.exe" release/
+          cp dist/onefile/TTSCloneStudio.exe "release/TTSCloneStudio-$VERSION-windows-portable.exe"
+          ls -la release
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: release/*
+          if-no-files-found: error
+
+      - name: Luu log de chan doan
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-logs
+          path: |
+            ci/
+            build/**/warn-*.txt
+            ${{ runner.temp }}/*.txt
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------ 3. macOS (Apple Silicon + Intel)
+  macos:
+    name: macOS ${{ matrix.arch }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+            file_arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+            file_arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.test.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Cai thu vien
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Kiem thu tren macOS
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python self_test.py
+          python -m unittest discover -s tests -v
+          python tests/smoke_gui.py -
+          python tests/update_gui_test.py
+
+      - name: Dong goi .app
+        env:
+          TTS_BUILD_MODE: onedir
+        run: python -m PyInstaller --noconfirm --clean TTSCloneStudio.spec
+
+      - name: Kiem tra kien truc
+        run: |
+          exe="dist/TTSCloneStudio.app/Contents/MacOS/TTSCloneStudio"
+          file "$exe"
+          file "$exe" | grep -q "${{ matrix.file_arch }}" || { echo "::error::wrong architecture"; exit 1; }
+
+      - name: Ky ad-hoc va xac minh chu ky
+        run: |
+          APP="dist/TTSCloneStudio.app"
+          # PyInstaller already ad-hoc signs every binary. ffmpeg ships as package data,
+          # so sign it explicitly, then re-seal the bundle (top level only, keeps nested signatures).
+          find "$APP/Contents" -type f -name 'ffmpeg-*' -print -exec codesign --force --sign - --timestamp=none {} \;
+          codesign --force --sign - --timestamp=none "$APP"
+          if ! codesign --verify --deep --strict --verbose=2 "$APP"; then
+            echo "::warning::top-level seal not enough, re-signing with --deep"
+            codesign --force --deep --sign - --timestamp=none "$APP"
+            codesign --verify --deep --strict --verbose=2 "$APP"
+          fi
+          codesign -dv "$APP" 2>&1 | grep -E "Signature|Identifier|Format" || true
+
+      - name: Tu kiem tra app da dong goi
+        run: |
+          mkdir -p ci
+          python tools/ci_selfcheck.py dist/TTSCloneStudio.app mac-app ci/app.json
+
+      - name: Nen zip (ditto giu symlink + chu ky)
+        run: |
+          mkdir -p release
+          ditto -c -k --sequesterRsrc --keepParent dist/TTSCloneStudio.app "release/TTSCloneStudio-$VERSION-mac-${{ matrix.arch }}.zip"
+          ls -la release
+
+      - name: Giai nen nhu nguoi dung + tu kiem tra lai
+        run: |
+          rm -rf "$RUNNER_TEMP/unz" && mkdir -p "$RUNNER_TEMP/unz"
+          ditto -x -k "release/TTSCloneStudio-$VERSION-mac-${{ matrix.arch }}.zip" "$RUNNER_TEMP/unz"
+          codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/unz/TTSCloneStudio.app"
+          python tools/ci_selfcheck.py "$RUNNER_TEMP/unz/TTSCloneStudio.app" mac-app ci/unzipped.json
+
+      - name: Kiem thu tu cap nhat that (thay .app)
+        run: |
+          export TTS_CI_MAC_ZIP="$PWD/release/TTSCloneStudio-$VERSION-mac-${{ matrix.arch }}.zip"
+          python -m unittest discover -s tests -p "test_updater.py" -k MacRealUpdateTests -v
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mac-${{ matrix.arch }}
+          path: release/*
+          if-no-files-found: error
+
+      - name: Luu log de chan doan
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mac-${{ matrix.arch }}-logs
+          path: |
+            ci/
+            build/**/warn-*.txt
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------ 4. Release
+  release:
+    name: Phat hanh GitHub Release
+    needs: [test, windows, macos]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.test.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Kiem tra du file + SHA256SUMS
+        run: |
+          cd release
+          ls -la
+          for f in "TTSCloneStudio-$VERSION-windows-setup.exe" "TTSCloneStudio-$VERSION-windows-portable.exe" \
+                   "TTSCloneStudio-$VERSION-mac-arm64.zip" "TTSCloneStudio-$VERSION-mac-x64.zip"; do
+            test -s "$f" || { echo "::error::thieu file $f"; exit 1; }
+          done
+          sha256sum TTSCloneStudio-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Tao Release v${{ env.VERSION }}
+        run: |
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "::error::Release v$VERSION da ton tai. Hay tang APP_VERSION trong app_info.py roi chay lai."
+            exit 1
+          fi
+          gh release create "v$VERSION" release/* \
+            --title "TTS Clone Studio $VERSION" \
+            --notes-file RELEASE_NOTES.md \
+            --target "$GITHUB_SHA" \
+            --latest
+          gh release view "v$VERSION" --json assets --jq '.assets[].name'
