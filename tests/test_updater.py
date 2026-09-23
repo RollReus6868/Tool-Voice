@@ -48,6 +48,7 @@ class FakeGitHub:
     def __exit__(self, *a):
         updater.API_BASE = self._old
         self.srv.shutdown()
+        self.srv.server_close()
 
     def release(self, version, files: dict[str, bytes], digest=True, sums=False, bad_digest=False):
         assets = []
@@ -198,11 +199,15 @@ class ScriptTests(unittest.TestCase):
         self.assertIn("/VERYSILENT", updater.windows_script("win-setup"))
         self.assertIn("move /y", updater.windows_script("win-portable"))
 
+    # Windows: shutil.which("bash") finds System32\bash.exe, the WSL launcher, which exits 1
+    # without a Linux distro (and cannot read Windows temp paths). The mac helper only ever
+    # runs on macOS, and this check runs on the Linux + both macOS CI jobs.
+    @unittest.skipIf(os.name == "nt", "mac helper is checked on Linux/macOS")
     @unittest.skipUnless(shutil.which("bash"), "needs bash")
     def test_mac_script_syntax(self):
         s = updater.mac_script(new_app="/tmp/a b/New.app", target_app="/Applications/X's.app", pid=1,
                                log="/tmp/l.txt", staging="/tmp/s")
-        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False, encoding="utf-8", newline="\n") as f:
             f.write(s)
         try:
             r = subprocess.run(["bash", "-n", f.name], capture_output=True, text=True)

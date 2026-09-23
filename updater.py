@@ -141,7 +141,8 @@ def fetch_latest(repo: str = GITHUB_REPO, timeout: float = 20) -> ReleaseInfo:
         raise UpdateError("Chưa cấu hình kho GitHub để kiểm tra cập nhật.")
     url = f"{API_BASE}/repos/{repo}/releases/latest"
     try:
-        r = _session().get(url, timeout=timeout)
+        with _session() as s:
+            r = s.get(url, timeout=timeout)
     except requests.RequestException as exc:
         raise UpdateError(f"Không kết nối được GitHub: {exc.__class__.__name__}. Kiểm tra Internet.") from exc
     if r.status_code == 404:
@@ -167,7 +168,8 @@ def expected_sha256(rel: ReleaseInfo, asset: dict, timeout: float = 20) -> str |
     if not sums:
         return None
     try:
-        text = _session().get(sums["url"], timeout=timeout).text
+        with _session() as s:
+            text = s.get(sums["url"], timeout=timeout).text
     except requests.RequestException:
         return None
     for line in text.splitlines():
@@ -194,8 +196,8 @@ def download_asset(rel: ReleaseInfo, asset: dict, dest_dir: str | Path,
     part = final.with_name(final.name + ".part")
     want = expected_sha256(rel, asset)
     try:
-        with _session().get(asset["url"], stream=True, timeout=60,
-                            headers={"Accept": "application/octet-stream"}) as r:
+        with _session() as s, s.get(asset["url"], stream=True, timeout=60,
+                                     headers={"Accept": "application/octet-stream"}) as r:
             if r.status_code >= 400:
                 raise UpdateError(f"Tải bản cập nhật lỗi HTTP {r.status_code}.")
             total = int(r.headers.get("Content-Length") or asset.get("size") or 0)
@@ -339,6 +341,11 @@ rm -f "$0"
 """
 
 
+# keep a reference to the detached helper: a dropped Popen of a still-running
+# process only triggers a ResourceWarning, but holding it keeps logs clean
+_HELPERS: list[subprocess.Popen] = []
+
+
 def launch_helper(kind: str, *, new_path: str, target: str, log: str, staging: str = "",
                   pid: int | None = None) -> str:
     """Write the helper script and start it detached. Returns the script path.
@@ -349,15 +356,15 @@ def launch_helper(kind: str, *, new_path: str, target: str, log: str, staging: s
         script = tmp / "cap_nhat.cmd"
         script.write_bytes(windows_script(kind).encode("ascii"))
         env = dict(os.environ, TTS_PID=str(pid), TTS_NEW=new_path, TTS_TARGET=target, TTS_LOG=log)
-        subprocess.Popen(["cmd.exe", "/c", str(script)], creationflags=_NO_WINDOW | _NEW_GROUP,
-                         close_fds=True, cwd=str(tmp), env=env)
+        _HELPERS.append(subprocess.Popen(["cmd.exe", "/c", str(script)], creationflags=_NO_WINDOW | _NEW_GROUP,
+                                         close_fds=True, cwd=str(tmp), env=env))
     elif kind == "mac-app":
         script = tmp / "cap_nhat.sh"
         script.write_text(mac_script(new_app=new_path, target_app=target, pid=pid, log=log, staging=staging),
                           encoding="utf-8")
         script.chmod(0o755)
-        subprocess.Popen(["/bin/bash", str(script)], start_new_session=True, close_fds=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _HELPERS.append(subprocess.Popen(["/bin/bash", str(script)], start_new_session=True, close_fds=True,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
     else:
         raise UpdateError("Kiểu cài đặt này không tự cập nhật được.")
     return str(script)
