@@ -24,7 +24,8 @@ from media import VIDEO_SIZES, find_ffmpeg, make_video, probe_duration
 from providers import DELIVERY, INSTRUCTION_MODELS, LANGUAGES, MODELS, SPEED_RANGE, build_provider, language_label
 from utils import fmt_duration, parse_row_selection, safe_filename, sample_hint, split_text, validate_voice_sample
 import usage
-from widgets import Card, ChoiceRow, ResponsiveRow, StatTile, button, label
+from widgets import (TOTAL_COLOR, Card, ChoiceRow, ResponsiveRow, StatTile, UsageBarChart, UsageDonut, button,
+                     label)
 from workers import BatchWorker, FuncWorker, produce_outputs
 import updater
 from app_info import GITHUB_REPO
@@ -44,10 +45,12 @@ NAV = [
     ("📊", "Hàng loạt Excel", "green"),
     ("🎬", "Video MP4", "pink"),
     ("⚙", "Cài đặt API", "amber"),
+    ("📈", "Mức dùng", "violet"),
     ("🔄", "Cập nhật", "teal"),
     ("📖", "Hướng dẫn", "cyan"),
 ]
-PAGE_CLONE, PAGE_TTS, PAGE_BATCH, PAGE_VIDEO, PAGE_SETTINGS, PAGE_UPDATE, PAGE_GUIDE = range(7)
+PAGE_CLONE, PAGE_TTS, PAGE_BATCH, PAGE_VIDEO, PAGE_SETTINGS, PAGE_USAGE, PAGE_UPDATE, PAGE_GUIDE = range(8)
+VIEW_FOR_DAYS = {1: "24h", 7: "7d", 30: "30d", 90: "90d"}
 UPDATE_EVERY_MS = 6 * 3600 * 1000
 
 
@@ -130,7 +133,7 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         for builder in (self._page_clone, self._page_tts, self._page_batch, self._page_video,
-                        self._page_settings, self._page_update, self._page_guide):
+                        self._page_settings, self._page_usage, self._page_update, self._page_guide):
             self.stack.addWidget(builder())
 
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -187,6 +190,8 @@ class MainWindow(QMainWindow):
         self.chip_minimax = label("", chip="true")
         self.chip_voices = label("", chip="true")
         self.chip_usage = label("", chip="true")
+        self.chip_usage.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chip_usage.mousePressEvent = lambda _e: self.go(PAGE_USAGE)
         for c in (self.chip_usage, self.chip_voices, self.chip_inworld, self.chip_minimax, self.chip_ffmpeg):
             cb.addWidget(c)
         lay.addWidget(self.chip_box, 1)
@@ -892,7 +897,7 @@ class MainWindow(QMainWindow):
         mm.body.addStretch()
         row.add(mm, 1)
         lay.addWidget(row)
-        lay.addWidget(self._usage_card())
+        lay.addWidget(self._usage_link_card())
 
         bottom = Card("Lưu & dữ liệu", "amber")
         br = QHBoxLayout()
@@ -908,10 +913,26 @@ class MainWindow(QMainWindow):
         lay.addStretch()
         return page
 
-    def _usage_card(self):
+    def _usage_link_card(self):
         card = Card("💳  Gói & mức dùng Inworld", "violet",
-                    "Inworld chưa có API để đọc số dư, nên app tự cộng số ký tự Inworld báo đã xử lý sau mỗi lần "
-                    "đọc và tính tiền theo bảng giá của gói. Nhập số dư đang thấy ở trang Billing để app tính phần còn lại.")
+                    "Số dư, biểu đồ ký tự theo model và nút đồng bộ với trang Billing/Usage của Inworld "
+                    "nằm ở trang 📈 Mức dùng.")
+        r = QHBoxLayout()
+        r.addWidget(button("📈  Mở trang Mức dùng", tint="violet", slot=lambda: self.go(PAGE_USAGE)))
+        r.addStretch()
+        card.add(r)
+        return card
+
+    # ================================================================ usage page
+    def _page_usage(self):
+        page, lay, head = self._page(
+            "📈", "Mức dùng Inworld",
+            "Inworld không có API đọc số dư/usage, nên bấm 🔄 Đồng bộ và chép số ở trang Billing/Usage vào — "
+            "app lấy đúng số đó làm mốc rồi tự cộng mỗi lần đọc sau đó.", "violet")
+        head.addWidget(button("🔄  Đồng bộ với Inworld", variant="violet", slot=self.sync_usage,
+                              tip="Chép số dư ở Billing và số ký tự ở Usage của Inworld vào app"))
+
+        bal = Card("💳  Số dư & gói", "violet")
         g = QGridLayout()
         g.setHorizontalSpacing(10)
         g.setVerticalSpacing(8)
@@ -923,24 +944,89 @@ class MainWindow(QMainWindow):
         self.usage_budget.setRange(0, 1_000_000)
         self.usage_budget.setDecimals(2)
         self.usage_budget.setPrefix("$ ")
-        self.usage_budget.setToolTip("Số dư (credit) đầu kỳ hiện ở đầu trang Billing của Inworld.")
-        self.usage_plan.currentIndexChanged.connect(lambda _: self._usage_settings_changed())
+        self.usage_budget.setToolTip("Credit tính là 100 % (mặc định = credit hằng tháng của gói). "
+                                     "Chưa đồng bộ số dư thì app lấy số này trừ dần.")
+        self.usage_plan.currentIndexChanged.connect(lambda _: self._usage_settings_changed(plan_changed=True))
         self.usage_budget.editingFinished.connect(self._usage_settings_changed)
         g.addWidget(label("📦 Gói", role="field"), 0, 0)
         g.addWidget(self.usage_plan, 0, 1)
-        g.addWidget(label("💰 Số dư đầu kỳ", role="field"), 0, 2)
+        g.addWidget(label("🎯 Credit 100%", role="field"), 0, 2)
         g.addWidget(self.usage_budget, 0, 3)
-        g.setColumnStretch(1, 1)
+        g.setColumnStretch(1, 2)
         g.setColumnStretch(3, 1)
-        card.add(g)
+        bal.add(g)
+        self.u_tile_left = StatTile("Số dư còn lại", "green", "💰")
+        self.u_tile_chars_left = StatTile("Ký tự còn đọc được", "violet", "🧮")
+        self.u_tile_spent = StatTile("Đã dùng trong kỳ", "orange", "💸")
+        self.u_tile_sync = StatTile("Đồng bộ lần cuối", "blue", "🔄")
+        bal.add(self._tile_grid((self.u_tile_left, self.u_tile_chars_left), (self.u_tile_spent, self.u_tile_sync)))
+        self.usage_bar = QProgressBar()
+        self.usage_bar.setRange(0, 1000)
+        bal.add(self.usage_bar)
+        self.usage_detail = label("", role="hint", wrap=True)
+        self.usage_detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        bal.add(self.usage_detail)
+        r = QHBoxLayout()
+        r.addWidget(button("🔗 Mở Billing", tint="violet", tip="Xem gói và số dư thật trên Inworld",
+                           slot=lambda: QDesktopServices.openUrl(QUrl(usage.BILLING_URL))))
+        r.addWidget(button("📈 Mở Usage", tint="blue", tip="Xem biểu đồ sử dụng thật trên Inworld",
+                           slot=lambda: QDesktopServices.openUrl(QUrl(usage.USAGE_URL))))
+        r.addStretch()
+        bal.add(r)
+        lay.addWidget(bal)
 
-        self.u_tile_chars = StatTile("Ký tự đã dùng", "blue", "🔤")
-        self.u_tile_spent = StatTile("Tiền đã dùng", "orange", "💸")
-        self.u_tile_left = StatTile("Tiền còn lại", "green", "💰")
-        self.u_tile_chars_left = StatTile("Ký tự còn lại (ước tính)", "violet", "🧮")
+        hist = Card("📊  Lịch sử sử dụng — Text-to-Speech", "blue",
+                    "Giống trang Usage của Inworld: ngày theo giờ UTC, tiền là ước tính theo bảng giá của gói.")
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        self.usage_view = ChoiceRow([(k, lb, "blue") for k, lb, _d in usage.VIEWS])
+        self.usage_view.set_value(self.config.get("usage_view") or "30d")
+        self.usage_view.changed.connect(self._usage_view_changed)
+        self.usage_group = ChoiceRow([("model", "🧠 Theo model", "violet"), ("total", "Σ Tổng", "teal")])
+        self.usage_group.set_value(self.config.get("usage_group") or "model")
+        self.usage_group.changed.connect(self._usage_view_changed)
+        top.addWidget(self.usage_view)
+        top.addStretch()
+        top.addWidget(self.usage_group)
+        hist.add(top)
+        self.u_tile_range_chars = StatTile("Ký tự", "blue", "🔤")
+        self.u_tile_range_cost = StatTile("Chi phí ước tính", "orange", "💵")
+        tiles = QHBoxLayout()
+        tiles.setSpacing(10)
+        tiles.addWidget(self.u_tile_range_chars, 1)
+        tiles.addWidget(self.u_tile_range_cost, 1)
+        hist.add(tiles)
+        charts = ResponsiveRow(820, spacing=12)
+        self.responsive.append(charts)
+        self.usage_chart = UsageBarChart()
+        self.usage_donut = UsageDonut()
+        charts.add(self.usage_chart, 3)
+        charts.add(self.usage_donut, 1, fixed_width=230)
+        hist.add(charts)
+        self.usage_legend = label("", role="hint", wrap=True)
+        self.usage_legend.setTextFormat(Qt.TextFormat.RichText)
+        hist.add(self.usage_legend)
+        self.usage_table = QTableWidget(0, 4)
+        self.usage_table.setHorizontalHeaderLabels(["Model", "Ký tự", "Tiền ước tính", "Tỷ lệ"])
+        self.usage_table.verticalHeader().setVisible(False)
+        self.usage_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.usage_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.usage_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        hh = self.usage_table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for c in (1, 2, 3):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        hist.add(self.usage_table)
+        self.usage_note = label("", role="hint", wrap=True)
+        hist.add(self.usage_note)
+        lay.addWidget(hist)
+        lay.addStretch()
+        return page
+
+    def _tile_grid(self, *pairs):
         tiles = ResponsiveRow(1060, spacing=10)      # 4 in a row when wide, 2 × 2 when narrow
         self.responsive.append(tiles)
-        for pair in ((self.u_tile_chars, self.u_tile_spent), (self.u_tile_left, self.u_tile_chars_left)):
+        for pair in pairs:
             holder = QWidget()
             hl = QHBoxLayout(holder)
             hl.setContentsMargins(0, 0, 0, 0)
@@ -949,68 +1035,72 @@ class MainWindow(QMainWindow):
                 t.setMinimumWidth(0)
                 hl.addWidget(t, 1)
             tiles.add(holder, 1)
-        card.add(tiles)
-        self.usage_bar = QProgressBar()
-        self.usage_bar.setRange(0, 1000)
-        card.add(self.usage_bar)
-        self.usage_detail = label("", role="hint", wrap=True)
-        self.usage_detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        card.add(self.usage_detail)
-        r = QHBoxLayout()
-        r.addWidget(button("🔗 Mở Billing", tint="violet", tip="Xem gói và số dư thật trên Inworld",
-                           slot=lambda: QDesktopServices.openUrl(QUrl(usage.BILLING_URL))))
-        r.addWidget(button("📈 Mở Usage", tint="blue", tip="Xem biểu đồ sử dụng thật trên Inworld",
-                           slot=lambda: QDesktopServices.openUrl(QUrl(usage.USAGE_URL))))
-        r.addStretch()
-        r.addWidget(button("♻ Bắt đầu kỳ mới", tint="amber", slot=self.reset_usage,
-                           tip="Đặt lại bộ đếm (ví dụ đầu tháng hoặc sau khi nạp thêm) và nhập số dư mới"))
-        card.add(r)
-        return card
+        return tiles
 
     def _usage_data(self) -> dict:
         return usage.normalize(self.config.get("inworld_usage"))
 
-    def _usage_settings_changed(self):
-        d = self._usage_data()
+    def _usage_settings_changed(self, plan_changed: bool = False):
         plan = self.usage_plan.currentData() or "on_demand"
-        d["plan"] = plan
-        d["budget"] = float(self.usage_budget.value()) or usage.PLAN_CREDITS.get(plan, 0.0)
+        budget = None if plan_changed else float(self.usage_budget.value())
+        d = usage.set_plan(self._usage_data(), plan, budget)
         self.config = self.config_store.save({"inworld_usage": d})
         self._refresh_usage()
 
-    def reset_usage(self):
-        plan = self.usage_plan.currentData() or "on_demand"
-        cur = self.usage_budget.value() or usage.PLAN_CREDITS.get(plan, 0.0)
-        val, ok = QInputDialog.getDouble(
-            self, "Bắt đầu kỳ mới",
-            "Bộ đếm ký tự và tiền sẽ về 0.\nNhập số dư (credit) đang thấy ở trang Billing của Inworld ($):",
-            float(cur), 0, 1_000_000, 2)
-        if not ok:
+    def _usage_view_changed(self, _v=None):
+        self.config = self.config_store.save({"usage_view": self.usage_view.value(),
+                                              "usage_group": self.usage_group.value()})
+        self._refresh_usage()
+
+    def sync_usage(self):
+        from dialogs import SyncUsageDialog
+        dlg = SyncUsageDialog(self._usage_data(), self)
+        if not dlg.exec() or not dlg.values:
             return
-        self.config = self.config_store.save({"inworld_usage": usage.new_period(plan, val)})
-        self.log(f"♻ Bắt đầu kỳ theo dõi Inworld mới: {usage.PLAN_LABEL[plan]}, số dư {usage.fmt_usd(val)}.")
+        balance, chars, days = dlg.values
+        self.apply_usage_sync(balance, chars, days)
+
+    def apply_usage_sync(self, balance, chars: dict, days: int):
+        d = usage.sync(self._usage_data(), balance, chars, days)
+        self.config = self.config_store.save({"inworld_usage": d})
+        s = d["sync"]
+        bits = []
+        if balance is not None:
+            bits.append(f"số dư {usage.fmt_usd(balance)}")
+        if chars:
+            bits.append(f"{usage.fmt_int(sum(chars.values()))} ký tự/{days} ngày "
+                        f"(thêm {usage.fmt_int(sum(s['adj'].values()))} ký tự đọc ngoài app hoặc trước khi app ghi)")
+        self.log("🔄 Đã đồng bộ với Inworld: " + ", ".join(bits) + ".")
+        if chars and VIEW_FOR_DAYS.get(days) and usage.VIEW_DAYS.get(self.usage_view.value(), 30) < days:
+            self.usage_view.set_value(VIEW_FOR_DAYS[days])
+            self.config = self.config_store.save({"usage_view": VIEW_FOR_DAYS[days]})
         self._refresh_usage()
 
     def _record_usage(self, provider: str, model: str, chars: int):
-        """Main thread only: add billed characters to the Inworld tally."""
+        """Main thread only: add billed characters to the Inworld history."""
         if provider != "Inworld" or not chars:
             return
         self.config = self.config_store.save({"inworld_usage": usage.record(self._usage_data(), model, chars)})
         self._refresh_usage()
 
+    def _usage_model(self) -> str:
+        t = self.tts_model.currentText() if hasattr(self, "tts_model") else ""
+        return t if t.startswith("inworld") else usage.DEFAULT_MODEL
+
     def _refresh_usage(self):
         if not hasattr(self, "usage_plan"):
             return
         d = self._usage_data()
-        model = self.tts_model.currentText() if self.tts_model.currentText().startswith("inworld") else usage.DEFAULT_MODEL
+        model = self._usage_model()
         su = usage.summary(d, model)
         for w in (self.usage_plan, self.usage_budget):
             w.blockSignals(True)
         self.usage_plan.setCurrentIndex(max(0, self.usage_plan.findData(su["plan"])))
-        self.usage_budget.setValue(su["budget"])
+        self.usage_budget.setValue(d["budget"])
         for w in (self.usage_plan, self.usage_budget):
             w.blockSignals(False)
-        self.u_tile_chars.set(usage.fmt_int(su["chars"]))
+        s = su["sync"]
+        self.u_tile_sync.set(usage.fmt_ago(s["at"]) if s else "Chưa")
         self.u_tile_spent.set(usage.fmt_usd(su["spent"]))
         if su["budget"] > 0:
             self.u_tile_left.set(f"{usage.fmt_usd(su['remaining'])}  ({su['left_pct']:.0f}%)")
@@ -1022,32 +1112,104 @@ class MainWindow(QMainWindow):
             self.u_tile_left.set("—")
             self.u_tile_chars_left.set("—")
             self.usage_bar.setValue(0)
-            self.usage_bar.setFormat("Nhập số dư đầu kỳ để xem % còn lại")
+            self.usage_bar.setFormat("Bấm 🔄 Đồng bộ và nhập số dư ở Billing để xem % còn lại")
             accent = "amber"
         if self.usage_bar.property("accent") != accent:
             self.usage_bar.setProperty("accent", accent)
             st = self.usage_bar.style()
             st.unpolish(self.usage_bar)
             st.polish(self.usage_bar)
-        since = (su["since"] or "").replace("T", " ")[:16]
-        parts = [f"📦 {su['plan_label']}  •  tính từ {since}  •  {su['requests']} lần đọc",
-                 f"💵 Giá {model}: {usage.fmt_usd(su['rate'])} / 1 triệu ký tự"]
-        if su["by_model"]:
-            parts.append("🧠 " + "  •  ".join(f"{m}: {usage.fmt_int(c)} ký tự ({usage.fmt_usd(v)})"
-                                                 for m, c, v in su["by_model"]))
-        parts.append("ℹ Số liệu do app tự tính, chỉ gồm các lần đọc từ app này; đối chiếu với trang Billing để chính xác.")
-        self.usage_detail.setText("\n".join(parts))
+        anchor = datetime.fromtimestamp(su["anchor"]).strftime("%d/%m %H:%M")
+        if su["source"] == "sync":
+            first = (f"💰 Số dư Billing {usage.fmt_usd(su['base'])} (đồng bộ {usage.fmt_ago(s['bal_at'])}) "
+                     f"− {usage.fmt_int(su['chars_after'])} ký tự đọc trong app từ {anchor} "
+                     f"({usage.fmt_usd(su['spent_after'])})")
+        else:
+            first = (f"🎯 Chưa đồng bộ số dư: lấy credit {usage.fmt_usd(su['base'])} − {usage.fmt_int(su['chars_after'])} "
+                     f"ký tự đọc trong app từ {anchor} ({usage.fmt_usd(su['spent_after'])})")
+        self.usage_detail.setText("\n".join([
+            first,
+            f"📦 {su['plan_label']}  •  💵 Giá {model}: {usage.fmt_usd(su['rate'])} / 1 triệu ký tự  •  "
+            f"{su['requests']} lần đọc đã ghi",
+            "ℹ Inworld cập nhật trang Usage khoảng mỗi giờ, nên các lần đọc trong 1–2 giờ gần nhất được app tự cộng "
+            "thêm. Nếu lệch, bấm 🔄 Đồng bộ lại.",
+        ]))
+        self._refresh_usage_history(d)
         # header chip + TTS page line
         if su["budget"] > 0:
             self.chip_usage.setText(f"💳 Inworld còn {su['left_pct']:.0f}%")
             self.chip_usage.setToolTip(f"Còn {usage.fmt_usd(su['remaining'])} / {usage.fmt_usd(su['budget'])} "
-                                       f"• ~{usage.fmt_int(su['chars_left'])} ký tự ({model})")
+                                       f"• ~{usage.fmt_int(su['chars_left'])} ký tự ({model}) • bấm để xem chi tiết")
         else:
-            self.chip_usage.setText(f"💳 {usage.fmt_usd(su['spent'])}")
-            self.chip_usage.setToolTip("Đã dùng trên Inworld (app tự tính). Nhập số dư ở ⚙ Cài đặt API để xem % còn lại.")
+            self.chip_usage.setText(f"💳 {usage.fmt_usd(su['spent_after'])}")
+            self.chip_usage.setToolTip("Đã dùng trên Inworld (app tự tính). Bấm để mở 📈 Mức dùng và đồng bộ số dư.")
         self._usage_chip_on = bool(su["chars"] or su["budget"])
         self._apply_responsive()
         self._update_counter()
+
+    def _refresh_usage_history(self, d: dict):
+        se = usage.series(d, self.usage_view.value())
+        by_model = self.usage_group.value() == "model"
+        colors = {m: usage.model_color(m, se["models"]) for m in se["models"]}
+        view_label = dict((k, lb) for k, lb, _d in usage.VIEWS)[se["view"]]
+        self.u_tile_range_chars.caption.setText(f"🔤  Ký tự — {view_label} qua")
+        self.u_tile_range_chars.set(usage.fmt_int(se["chars"]))
+        self.u_tile_range_cost.set(usage.fmt_usd(se["cost"]))
+        self.usage_chart.set_data(se, colors, by_model)
+        if by_model:
+            self.usage_donut.set_parts([(m, se["totals"][m]["chars"], colors[m]) for m in se["models"]])
+            legend = "   ".join(f"<span style='color:{colors[m]}'>●</span> {m}" for m in se["models"])
+        else:
+            self.usage_donut.set_parts([("Tổng", se["chars"], TOTAL_COLOR)])
+            legend = f"<span style='color:{TOTAL_COLOR}'>●</span> Tổng"
+        if se["sync_included"]:
+            legend += "   ▨ = số đồng bộ từ Inworld (đọc ngoài app / trước khi app ghi)"
+        self.usage_legend.setText(legend or "Chưa có lần đọc nào trong khung này.")
+        rows = se["models"] if by_model else []
+        t = self.usage_table
+        t.setRowCount(len(rows) + 1)
+        total = se["chars"] or 1
+
+        def put(r, c, text, bold=False, align_right=True, color=None, tip=""):
+            it = QTableWidgetItem(text)
+            if align_right:
+                it.setTextAlignment(int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter))
+            if bold:
+                f = it.font()
+                f.setBold(True)
+                it.setFont(f)
+            if color:
+                it.setForeground(QColor(color))
+            if tip:
+                it.setToolTip(tip)
+            t.setItem(r, c, it)
+
+        for r, m in enumerate(rows):
+            x = se["totals"][m]
+            tip = (f"Đọc trong app: {usage.fmt_int(x['app'])} • đồng bộ từ Inworld: {usage.fmt_int(x['sync'])}"
+                   if x["sync"] else "")
+            put(r, 0, f"●  {m}", align_right=False, color=colors[m], tip=tip)
+            put(r, 1, usage.fmt_int(x["chars"]), tip=tip)
+            put(r, 2, usage.fmt_usd(x["cost"]))
+            put(r, 3, f"{x['chars'] / total * 100:.0f}%")
+        last = len(rows)
+        put(last, 0, "Tổng", bold=True, align_right=False)
+        put(last, 1, usage.fmt_int(se["chars"]), bold=True)
+        put(last, 2, usage.fmt_usd(se["cost"]), bold=True)
+        put(last, 3, "100%" if se["chars"] else "—", bold=True)
+        t.resizeRowsToContents()
+        h = t.horizontalHeader().height() + sum(t.rowHeight(i) for i in range(t.rowCount())) + 4
+        t.setFixedHeight(h)
+        s = d.get("sync")
+        if se["note"]:
+            self.usage_note.setText("ℹ " + se["note"])
+        elif s and s.get("chars"):
+            self.usage_note.setText(
+                f"ℹ Lần đồng bộ {usage.fmt_ago(s['at'])}: Inworld báo {usage.fmt_int(sum(s['chars'].values()))} ký tự "
+                f"trong {s['days']} ngày; app cộng thêm các lần đọc sau đó.")
+        else:
+            self.usage_note.setText("ℹ Chỉ gồm các lần đọc trong app này. Bấm 🔄 Đồng bộ với Inworld để thêm phần "
+                                    "đọc ở nơi khác (Playground, API key khác, bản app cũ) cho khớp trang Usage.")
 
     # ---------------------------------------------------------------- guide
     def _page_update(self):
@@ -1300,9 +1462,11 @@ class MainWindow(QMainWindow):
                    "Chọn cột, bấm <b>🚀 Chạy hàng loạt</b>. Bật <b>⏭ Bỏ qua dòng đã có file</b> để chạy tiếp khi bị ngắt; "
                    "bật <b>🔗 Gộp</b> để có thêm 1 file tổng. Chỉ muốn chạy vài dòng? Gõ vào <b>🔢 Chỉ chạy STT</b>, "
                    "ví dụ <code>1-10, 15, 20-</code> (số STT ở cột đầu bảng).")
-            + f"<p style='color:{c['violet']}'><b>💳 Gói & số dư Inworld:</b> ở <b>Cài đặt API</b>, chọn gói và nhập số dư đang thấy "
-              "trên trang Billing. App tự cộng số ký tự đã dùng, tính tiền, hiện phần còn lại theo % (nút <b>💳</b> trên thanh "
-              "tiêu đề). Đầu tháng hoặc sau khi nạp tiền, bấm <b>♻ Bắt đầu kỳ mới</b>.</p>"
+            + f"<p style='color:{c['violet']}'><b>📈 Mức dùng Inworld:</b> Inworld không cho app đọc số dư, nên ở trang "
+              "<b>Mức dùng</b> bấm <b>🔄 Đồng bộ với Inworld</b> và chép vào: số dư ở trang <b>Billing</b>, số ký tự "
+              "(tổng và từng model) ở trang <b>Usage</b>. App lấy đúng số đó làm mốc, tự cộng mỗi lần đọc sau đó, vẽ "
+              "biểu đồ 24 giờ / 7 / 30 / 90 ngày theo model và hiện % còn lại (nút <b>💳</b> trên thanh tiêu đề). "
+              "Thỉnh thoảng đồng bộ lại (ví dụ đầu tháng, sau khi nạp tiền) để luôn khớp.</p>"
             + f"<p style='color:{c['pink']}'><b>🎬 Video MP4:</b> chọn ảnh nền và khung hình ở trang <b>Video MP4</b>. "
               "Video = ảnh tĩnh + giọng đọc, chuẩn H.264/AAC phát được trên YouTube, Facebook, TikTok.</p>"
             + f"<p style='color:{c['teal']}'><b>🔄 Cập nhật:</b> ứng dụng tự kiểm tra bản mới khi mở. Có bản mới sẽ hiện nút "
@@ -1385,6 +1549,9 @@ class MainWindow(QMainWindow):
         self._update_video_color_btn()
         self._update_video_preview()
         self._recolor_tables()
+        if hasattr(self, "usage_chart"):
+            self.usage_chart.set_theme(mode)
+            self.usage_donut.set_theme(mode)
         if save:
             self.config = self.config_store.save({"theme": mode})
 
@@ -1927,8 +2094,9 @@ class MainWindow(QMainWindow):
                 self.tts_usage.setText(f"💳 Inworld còn {usage.fmt_usd(su['remaining'])} ({su['left_pct']:.0f}%)  •  "
                                        f"~{usage.fmt_int(su['chars_left'])} ký tự với {model}")
             else:
-                self.tts_usage.setText(f"💳 Đã dùng {usage.fmt_usd(su['spent'])} ({usage.fmt_int(su['chars'])} ký tự)  •  "
-                                       "nhập số dư ở ⚙ Cài đặt API để xem % còn lại")
+                self.tts_usage.setText(f"💳 Đã dùng {usage.fmt_usd(su['spent_after'])} "
+                                       f"({usage.fmt_int(su['chars_after'])} ký tự)  •  "
+                                       "đồng bộ số dư ở 📈 Mức dùng để xem % còn lại")
             self.tts_usage.show()
         elif hasattr(self, "tts_usage"):
             self.tts_usage.hide()

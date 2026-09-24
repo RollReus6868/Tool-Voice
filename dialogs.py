@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QColor, QDesktopServices
 from PyQt6.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QGridLayout, QHBoxLayout, QHeaderView, QLineEdit,
     QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
+import usage
 from providers import LANGUAGES, PROVIDERS, build_provider
 from widgets import button, label
 from workers import FuncWorker
@@ -248,3 +249,116 @@ class ImportVoicesDialog(QDialog):
         if self.worker.isRunning():
             self.worker.wait(3000)
         super().accept()
+
+
+class SyncUsageDialog(QDialog):
+    """Type the numbers shown on Inworld's Billing and Usage pages (Inworld has no API for them)."""
+
+    RANGES = [(30, "Last 30 days (30 ngày)"), (7, "Last 7 days (7 ngày)"), (1, "Last 24 hours (24 giờ)")]
+
+    def __init__(self, data: dict | None = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Đồng bộ với Inworld")
+        self.setMinimumWidth(600)
+        self.values: tuple[float | None, dict, int] | None = None
+        d = usage.normalize(data)
+        last = d.get("sync") or {}
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 20, 22, 18)
+        lay.setSpacing(10)
+        lay.addWidget(label("🔄  Đồng bộ với Inworld", role="cardTitle", accent="violet"))
+        lay.addWidget(label(
+            "Inworld không cho app đọc trang Billing/Usage, nên bạn chép số ở đó vào đây. App lấy đúng số này "
+            "làm mốc rồi tự cộng các lần đọc sau đó.\n"
+            "① Billing: số dư (credit balance) ở đầu trang.\n"
+            "② Usage › Usage history: chọn khung thời gian và All API keys, chép số “Text-to-Speech … characters” "
+            "và số từng model trong bảng. Để trống ô nào thì ô đó giữ như cũ.", role="hint", wrap=True))
+        links = QHBoxLayout()
+        links.addWidget(button("🔗 Mở Billing", tint="violet",
+                               slot=lambda: QDesktopServices.openUrl(QUrl(usage.BILLING_URL))))
+        links.addWidget(button("📈 Mở Usage", tint="blue",
+                               slot=lambda: QDesktopServices.openUrl(QUrl(usage.USAGE_URL))))
+        links.addStretch()
+        lay.addLayout(links)
+
+        g = QGridLayout()
+        g.setHorizontalSpacing(12)
+        g.setVerticalSpacing(8)
+        self.balance = QLineEdit()
+        self.balance.setPlaceholderText("vd $22.10 — để trống nếu không muốn đổi")
+        if last.get("balance") is not None:
+            self.balance.setToolTip(f"Lần trước: {usage.fmt_usd(last['balance'])}")
+        self.range = QComboBox()
+        for days, text in self.RANGES:
+            self.range.addItem(text, days)
+        self.range.setCurrentIndex(max(0, self.range.findData(last.get("days") or 30)))
+        self.range.setToolTip("Khung thời gian đang chọn trên trang Usage của Inworld")
+        self.total = QLineEdit()
+        self.total.setPlaceholderText("vd 2,755 (số chính xác ở ô Usage by service)")
+        g.addWidget(label("💰 Số dư Billing", role="field"), 0, 0)
+        g.addWidget(self.balance, 0, 1)
+        g.addWidget(label("🗓 Khung Usage", role="field"), 1, 0)
+        g.addWidget(self.range, 1, 1)
+        g.addWidget(label("🔤 Tổng ký tự TTS", role="field"), 2, 0)
+        g.addWidget(self.total, 2, 1)
+        self.model_edits: dict[str, QLineEdit] = {}
+        for i, m in enumerate(usage.SYNC_MODELS):
+            e = QLineEdit()
+            e.setPlaceholderText("vd 2.5K hoặc 270 — trống = 0")
+            dot = f"<span style='color:{usage.MODEL_COLORS.get(m, '#888')}'>●</span> {m}"
+            lb = label(dot, role="field")
+            lb.setTextFormat(Qt.TextFormat.RichText)
+            g.addWidget(lb, 3 + i, 0)
+            g.addWidget(e, 3 + i, 1)
+            self.model_edits[m] = e
+        g.setColumnStretch(1, 1)
+        lay.addLayout(g)
+        self.preview = label("", role="hint", wrap=True)
+        lay.addWidget(self.preview)
+        r = QHBoxLayout()
+        r.addStretch()
+        r.addWidget(button("Huỷ", slot=self.reject))
+        self.ok_btn = button("✅  Đồng bộ", variant="violet", slot=self._accept)
+        r.addWidget(self.ok_btn)
+        lay.addLayout(r)
+        for e in [self.balance, self.total, *self.model_edits.values()]:
+            e.textChanged.connect(self._update_preview)
+        self._update_preview()
+
+    def _parse(self):
+        balance = usage.parse_money(self.balance.text())
+        total = usage.parse_count(self.total.text())
+        chars = {}
+        for m, e in self.model_edits.items():
+            n = usage.parse_count(e.text())
+            if n is not None:
+                chars[m] = n
+        if total is not None or chars:
+            chars = usage.reconcile(total, {m: chars.get(m, 0) for m in chars} if chars else {})
+            if total is not None and sum(chars.values()) != total:
+                raise ValueError("Tổng các model lớn hơn tổng ký tự — kiểm tra lại số đã chép.")
+        return balance, chars, int(self.range.currentData())
+
+    def _update_preview(self):
+        try:
+            balance, chars, days = self._parse()
+        except ValueError as e:
+            msg = str(e) if "Tổng" in str(e) else f"Không đọc được số “{e}”. Ví dụ đúng: 2,755 • 2.5K • $22.10"
+            self.preview.setText("⚠ " + msg)
+            self.ok_btn.setEnabled(False)
+            return
+        parts = []
+        if balance is not None:
+            parts.append(f"💰 số dư {usage.fmt_usd(balance)}")
+        if chars:
+            parts.append("🔤 " + " • ".join(f"{m}: {usage.fmt_int(n)}" for m, n in chars.items() if n)
+                         + f" = {usage.fmt_int(sum(chars.values()))} ký tự ({days} ngày)")
+        self.preview.setText("→ Sẽ lưu: " + ("   ".join(parts) if parts else "chưa nhập gì"))
+        self.ok_btn.setEnabled(bool(parts))
+
+    def _accept(self):
+        try:
+            self.values = self._parse()
+        except ValueError:
+            return
+        self.accept()

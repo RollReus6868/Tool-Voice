@@ -149,10 +149,111 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(su["left_pct"], 0.0)
 
     def test_normalize_garbage(self):
-        d = usage.normalize({"plan": "nope", "budget": "x", "chars": {"m": 0}})
+        d = usage.normalize({"plan": "nope", "budget": "x", "chars": {"m": 0}, "hours": {"bad": {"m": 1}},
+                             "sync": {"at": "x"}})
         self.assertEqual(d["plan"], "on_demand")
         self.assertEqual(d["budget"], 0.0)
-        self.assertEqual(d["chars"], {})
+        self.assertEqual(d["hours"], {})
+        self.assertIsNone(d["sync"])
+
+
+NOW = 1_790_000_000.0          # a fixed "now" (UTC) so buckets are predictable
+H = 3600
+
+
+class UsageHistoryTests(unittest.TestCase):
+    def test_migrates_22_tally(self):
+        d = usage.normalize({"plan": "creator", "budget": 25, "since": "2026-09-24T10:23:00",
+                             "chars": {"inworld-tts-2-flash": 1000}, "cost": {"inworld-tts-2-flash": 0.01},
+                             "requests": 3})
+        self.assertEqual(sum(sum(v.values()) for v in d["hours"].values()), 1000)
+        self.assertEqual(d["requests"], 3)
+        self.assertEqual(usage.summary(d)["chars"], 1000)
+
+    def test_parse_count(self):
+        for text, n in (("2,755", 2755), ("2.755", 2755), ("2.5K", 2500), ("2,5k", 2500), ("270", 270),
+                        ("1.2M", 1_200_000), ("2,755 characters", 2755), ("1.234.567", 1234567)):
+            self.assertEqual(usage.parse_count(text), n, text)
+        self.assertIsNone(usage.parse_count("  "))
+        for bad in ("abc", "2.5", "1,2,3k", "-5"):
+            with self.assertRaises(ValueError, msg=bad):
+                usage.parse_count(bad)
+
+    def test_parse_money(self):
+        for text, v in (("$22.10", 22.10), ("22,10", 22.10), ("$ 1,234.50", 1234.50), ("1.234,50", 1234.50),
+                        ("25", 25.0), ("$1,500", 1500.0), ("1.000.000", 1_000_000.0)):
+            self.assertAlmostEqual(usage.parse_money(text), v, msg=text)
+        self.assertIsNone(usage.parse_money(" $ "))
+        with self.assertRaises(ValueError):
+            usage.parse_money("abc")
+
+    def test_reconcile_uses_exact_total(self):
+        self.assertEqual(usage.reconcile(2755, {"inworld-tts-2-flash": 2500, "inworld-tts-2": 270}),
+                         {"inworld-tts-2-flash": 2485, "inworld-tts-2": 270})
+        self.assertEqual(usage.reconcile(None, {"a": 5}), {"a": 5})
+        self.assertEqual(usage.reconcile(300, {}), {"inworld-tts-2-flash": 300})
+
+    def test_sync_matches_inworld_then_grows(self):
+        d = usage.new_period("creator", 25.0, now=NOW - 10 * 86400)
+        d = usage.record(d, "inworld-tts-2-flash", 400, now=NOW - 3 * 86400)   # already on Inworld
+        d = usage.record(d, "inworld-tts-2-flash", 50, now=NOW - 60)            # too recent for Inworld
+        d = usage.sync(d, 24.90, {"inworld-tts-2-flash": 2485, "inworld-tts-2": 270}, 30, now=NOW)
+        self.assertEqual(d["sync"]["adj"], {"inworld-tts-2-flash": 2085, "inworld-tts-2": 270})
+        se = usage.series(d, "30d", now=NOW)
+        self.assertTrue(se["sync_included"])
+        self.assertEqual(se["totals"]["inworld-tts-2-flash"]["chars"], 2485 + 50)
+        self.assertEqual(se["chars"], 2755 + 50)
+        self.assertEqual(len(se["labels"]), 30)
+        # balance: synced value minus what Inworld has not counted yet
+        su = usage.summary(d, "inworld-tts-2-flash", now=NOW)
+        self.assertEqual(su["source"], "sync")
+        self.assertAlmostEqual(su["remaining"], 24.90 - 50 * 10 / 1e6)
+        self.assertAlmostEqual(su["left_pct"], su["remaining"] / 25 * 100)
+        d = usage.record(d, "inworld-tts-2", 1_000_000, now=NOW + 60)           # $20 on Creator
+        su = usage.summary(d, "inworld-tts-2-flash", now=NOW + 120)
+        self.assertAlmostEqual(su["remaining"], 24.90 - 20 - 0.0005)
+        self.assertEqual(usage.series(d, "30d", now=NOW + 120)["chars"], 2755 + 50 + 1_000_000)
+
+    def test_shorter_view_leaves_out_30_day_sync(self):
+        d = usage.sync(usage.new_period(now=NOW), None, {"inworld-tts-2": 900}, 30, now=NOW)
+        d = usage.record(d, "inworld-tts-2", 10, now=NOW)
+        se = usage.series(d, "24h", now=NOW)
+        self.assertFalse(se["sync_included"])
+        self.assertIn("30 ngày", se["note"])
+        self.assertEqual(se["chars"], 10)
+        self.assertEqual(len(se["labels"]), 24)
+        self.assertEqual(usage.series(d, "90d", now=NOW)["chars"], 910)
+        # 24-hour sync fits every view
+        d = usage.sync(d, None, {"inworld-tts-2": 100}, 1, now=NOW)
+        self.assertTrue(usage.series(d, "24h", now=NOW)["sync_included"])
+
+    def test_resync_replaces_previous_adjustment(self):
+        d = usage.sync(usage.new_period(now=NOW), 20.0, {"inworld-tts-2-flash": 1000}, 30, now=NOW)
+        d = usage.sync(d, 19.0, {"inworld-tts-2-flash": 1500}, 30, now=NOW + 86400)
+        self.assertEqual(usage.series(d, "30d", now=NOW + 86400)["chars"], 1500)
+        # balance only keeps the characters of the previous sync
+        d = usage.sync(d, 18.5, {}, 30, now=NOW + 2 * 86400)
+        self.assertEqual(d["sync"]["balance"], 18.5)
+        self.assertEqual(usage.series(d, "30d", now=NOW + 2 * 86400)["chars"], 1500)
+        self.assertEqual(usage.summary(d, now=NOW + 2 * 86400)["anchor"], d["sync"]["bal_cutoff"])
+
+    def test_no_balance_uses_budget_since_change(self):
+        d = usage.new_period("creator", 25.0, now=NOW - 5 * H)
+        d = usage.record(d, "inworld-tts-2-flash", 1_000_000, now=NOW - 4 * H)   # $10
+        self.assertAlmostEqual(usage.summary(d, now=NOW)["remaining"], 15.0)
+        d = usage.set_plan(d, "creator", 30.0, now=NOW)                           # new credit → new anchor
+        self.assertAlmostEqual(usage.summary(d, now=NOW)["remaining"], 30.0)
+        d = usage.set_plan(d, "builder", now=NOW)
+        self.assertEqual(d["budget"], 100.0)
+
+    def test_prune_and_formatting(self):
+        d = usage.record(None, "m", 5, now=NOW - 200 * 86400)
+        d = usage.record(d, "m", 7, now=NOW)
+        self.assertEqual(sum(sum(v.values()) for v in d["hours"].values()), 7)
+        self.assertEqual(usage.fmt_short(2755), "2.8K")
+        self.assertEqual(usage.fmt_short(270), "270")
+        self.assertEqual(usage.fmt_ago(NOW - 7200, now=NOW), "2 giờ trước")
+        self.assertEqual(usage.fmt_ago(None), "chưa đồng bộ")
 
 
 class RowSelectionTests(unittest.TestCase):

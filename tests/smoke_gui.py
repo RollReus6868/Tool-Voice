@@ -227,19 +227,48 @@ names = [v["local_name"] for v in w.voice_store.list()]
 assert len(names) == n0 + 1 and "Giọng clone của tôi" in names and "Mai" not in names, names
 w.sync_inworld_voices(silent=True); wait_workers()
 assert len(w.voice_store.list()) == n0 + 1
-# new period
-main.QInputDialog.getDouble = staticmethod(lambda *a, **k: (10.0, True))
-w.reset_usage(); pump()
-su = main.usage.summary(storage.ConfigStore().load()["inworld_usage"])
-assert su["chars"] == 0 and su["budget"] == 10.0 and su["plan"] == "creator", su
+# usage page: sync with the numbers from Inworld's Billing / Usage pages
+w.go(main.PAGE_USAGE); pump()
+sd = dialogs.SyncUsageDialog(w._usage_data(), w)
+sd.balance.setText("$24.97"); sd.total.setText("2,755 characters")
+sd.model_edits["inworld-tts-2-flash"].setText("2.5K"); sd.model_edits["inworld-tts-2"].setText("270"); pump()
+assert sd.ok_btn.isEnabled() and "2.485" in sd.preview.text(), sd.preview.text()
+shot("dialog_sync", sd)
+bal, chars, days = sd._parse()
+assert (bal, chars, days) == (24.97, {"inworld-tts-2-flash": 2485, "inworld-tts-2": 270}, 30), (bal, chars, days)
+sd.total.setText("abc"); pump()
+assert not sd.ok_btn.isEnabled() and "⚠" in sd.preview.text()
+sd.close()
+w.apply_usage_sync(bal, chars, days); pump()
+d = w._usage_data()
+se = main.usage.series(d, "30d")
+assert se["sync_included"] and se["totals"]["inworld-tts-2"]["chars"] >= 270, se["totals"]
+assert w.usage_view.value() == "30d"
+assert w.usage_table.rowCount() == len(se["models"]) + 1
+assert w.usage_table.item(w.usage_table.rowCount() - 1, 1).text() == main.usage.fmt_int(se["chars"])
+assert "đồng bộ" in w.usage_legend.text() and "vừa xong" in w.u_tile_sync.value.text()
+su = main.usage.summary(d)
+assert su["source"] == "sync" and 0 < su["remaining"] <= 24.97, su
+w.usage_view.set_value("24h", emit=True); pump()
+assert "30 ngày" in w.usage_note.text(), w.usage_note.text()
+w.usage_group.set_value("total", emit=True); pump()
+assert w.usage_table.rowCount() == 1
+w.usage_group.set_value("model", emit=True); w.usage_view.set_value("30d", emit=True); pump()
+# chip opens the usage page
+w.go(main.PAGE_TTS); w.chip_usage.mousePressEvent(None); pump()
+assert w.stack.currentIndex() == main.PAGE_USAGE
+# the 100 % credit only drives "remaining" until a balance is synced
 w.usage_budget.setValue(25.0); w._usage_settings_changed()
-w._record_usage("Inworld", "inworld-tts-2-flash", 1_000_000)   # $10 of $25 on Creator
-assert "60%" in w.chip_usage.text(), w.chip_usage.text()
+before = main.usage.summary(w._usage_data())["remaining"]
+w._record_usage("Inworld", "inworld-tts-2-flash", 1_000_000)   # $10 on Creator
+after = main.usage.summary(w._usage_data())["remaining"]
+assert abs((before - after) - 10.0) < 1e-6, (before, after)
+assert "%" in w.chip_usage.text(), w.chip_usage.text()
 
 w.tts_format.buttons["mp3"].click()
 for mode in ("dark", "light"):
     w.apply_theme(mode); pump()
-    for i, n in enumerate(["clone", "tts", "batch", "video", "settings", "update", "guide"]):
+    for i, n in enumerate(["clone", "tts", "batch", "video", "settings", "usage", "update", "guide"]):
         w.go(i)
         if n == "video": w._update_video_preview()
         shot(f"{mode}_{i}_{n}")

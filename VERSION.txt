@@ -1,4 +1,8 @@
-TTS Clone Studio 2.2.0
+TTS Clone Studio 2.3.0
+
+2.3.0
+- Trang Muc dung Inworld: bieu do theo ngay/gio, theo model, 24h/7/30/90 ngay
+- Dong bo voi Inworld: chep so du Billing + ky tu trang Usage lam moc, app tu cong phan doc sau do
 
 2.2.0
 - Duyet giong Inworld (loc, nghe thu, dung ngay) + tu dong bo giong clone

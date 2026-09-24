@@ -56,7 +56,7 @@ def main() -> int:
         problems.append(f"install kind {data.get('kind')!r} != expected {want_kind!r}")
     if data.get("frozen") and "imageio_ffmpeg" not in str(data.get("ffmpeg")):
         problems.append(f"ffmpeg is not the bundled copy: {data.get('ffmpeg')}")
-    if data.get("pages", 0) < 7:
+    if data.get("pages", 0) < 8:
         problems.append(f"only {data.get('pages')} pages rendered")
     if code != 0:
         problems.append(f"exit code {code}")
