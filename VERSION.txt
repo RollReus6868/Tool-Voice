@@ -1,4 +1,10 @@
-TTS Clone Studio 2.1.0
+TTS Clone Studio 2.2.0
+
+2.2.0
+- Duyet giong Inworld (loc, nghe thu, dung ngay) + tu dong bo giong clone
+- Delivery / khu nhieu / chi dan nhu Inworld Playground; model mac dinh inworld-tts-2-flash
+- Chay hang loat theo so thu tu (vd 1-10, 15, 20-)
+- Theo doi goi & so du Inworld: ky tu, tien da dung / con lai, %
 
 2.1.0
 - Tu cap nhat qua GitHub Releases (kiem tra, tai, kiem SHA-256, cai, mo lai)

@@ -1,4 +1,4 @@
-# 🎙 TTS Clone Studio 2.1
+# 🎙 TTS Clone Studio 2.2
 
 Ứng dụng **Windows & macOS**: **clone giọng nói → đọc văn bản → xuất MP3 / MP4**, chạy lẻ hoặc hàng loạt từ file Excel.
 Hỗ trợ 2 nhà cung cấp: **Inworld** và **MiniMax** (API chính thức). **Tự cập nhật** qua GitHub Releases.
@@ -51,9 +51,11 @@ Lần đầu mở, Windows SmartScreen có thể báo *Unknown publisher* → b�
 | Bước | Trang | Việc cần làm |
 |---|---|---|
 | 1 | ⚙ **Cài đặt API** | Dán API key Inworld và/hoặc MiniMax → **🔌 Kiểm tra kết nối** → **💾 Lưu** |
-| 2 | 🧬 **Clone giọng** | Chọn nhà cung cấp, chọn file giọng mẫu, đặt tên, tích xác nhận quyền → **Bắt đầu Clone**. Hoặc **☁ Lấy từ Inworld/MiniMax** để dùng giọng đã có trên tài khoản |
+| 2 | 🧬 **Clone giọng** | Chọn nhà cung cấp, chọn file giọng mẫu, đặt tên, tích xác nhận quyền → **Bắt đầu Clone**. Hoặc **☁ Duyệt giọng Inworld** (lọc, nghe thử, dùng ngay) / **🔄 Đồng bộ Inworld** / **☁ Lấy từ MiniMax** |
 | 3 | 🗣 **Đọc văn bản** | Chọn giọng, dán nội dung, chọn **MP3 / MP4 / Cả hai** → **🔊 Tạo giọng đọc** |
+| – | 🎭 **Delivery (Inworld)** | Ổn định / Cân bằng / Sáng tạo, ✨ khử nhiễu, 💬 chỉ dẫn phong cách (model inworld-tts-2). Model mặc định: `inworld-tts-2-flash` |
 | 4 | 📊 **Hàng loạt Excel** | Chọn file `.xlsx`, chọn cột nội dung và cột tên file → **🚀 Chạy hàng loạt** |
+| – | 💳 **Gói & mức dùng** | Ở trang Cài đặt API: chọn gói Inworld, nhập số dư đang thấy trên Billing → app tự tính ký tự/tiền đã dùng, còn lại và % |
 | – | 🎬 **Video MP4** | Chọn ảnh nền, màu nền, khung hình (16:9, 9:16 Shorts/TikTok, 1:1) |
 
 ### File Excel
@@ -65,6 +67,7 @@ Dòng đầu là tiêu đề. Ví dụ (bấm **📥 Tạo file Excel mẫu** đ
 | 0002 | Đây là dòng thứ hai. |
 
 - Cột tên file có thể để **🔢 Tự đánh số** (0001, 0002…). Tên trùng sẽ tự thêm `_2`, `_3`.
+- **🔢 Chỉ chạy STT**: gõ `1-10, 15, 20-` để chỉ chạy các dòng có số thứ tự đó (cột STT trong bảng); để trống = chạy tất cả.
 - **Bỏ qua dòng đã có file**: chạy tiếp từ chỗ dừng mà không tốn phí tạo lại.
 - **Gộp tất cả thành 1 file**: tạo thêm `TenExcel_GOP.mp3/.mp4` theo thứ tự dòng.
 - **Số luồng**: 2–3 là an toàn; cao quá dễ bị nhà cung cấp giới hạn tốc độ.
@@ -106,6 +109,7 @@ widgets.py    thành phần UI dùng lại                  dialogs.py   hộp t
 providers.py  API Inworld + MiniMax                   workers.py   luồng chạy nền, batch
 media.py      ffmpeg: ghép audio, MP4                 storage.py   cấu hình, thư viện giọng, keyring
 updater.py    tự cập nhật qua GitHub Releases         selfcheck.py tự kiểm tra app đã đóng gói (CI)
+usage.py      bảng giá + bộ đếm gói/số dư Inworld
 installer/    Inno Setup (.iss) cho bộ cài Windows    tools/       kiểm tra tĩnh + chạy tự kiểm tra CI
 tests/        kiểm thử (unittest, GUI, cập nhật)      .github/workflows/build.yml  build & phát hành
 ```

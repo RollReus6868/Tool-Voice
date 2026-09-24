@@ -194,6 +194,8 @@ QProgressBar {{
 QProgressBar::chunk {{ border-radius: 8px;
     background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {ACCENTS['violet'][0]}, stop:0.5 {ACCENTS['blue'][0]}, stop:1 {ACCENTS['cyan'][0]}); }}
 QProgressBar[accent="green"]::chunk {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {ACCENTS['teal'][0]}, stop:1 {ACCENTS['green'][1]}); }}
+QProgressBar[accent="amber"]::chunk {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {ACCENTS['orange'][0]}, stop:1 {ACCENTS['amber'][1]}); }}
+QProgressBar[accent="red"]::chunk {{ background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {ACCENTS['red'][2]}, stop:1 {ACCENTS['red'][1]}); }}
 
 /* ---------- scrollbars ---------- */
 QScrollBar:vertical {{ background: transparent; width: 11px; margin: 2px; }}

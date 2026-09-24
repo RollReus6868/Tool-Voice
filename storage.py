@@ -75,7 +75,29 @@ DEFAULT_CONFIG = {
     "auto_update": True,
     "skip_version": "",
     "last_update_check": "",
+    # 2.2
+    "iw_delivery": "BALANCED",       # STABLE | BALANCED | CREATIVE
+    "iw_enhance": False,             # enhanceGeneration (denoise)
+    "iw_instruction": "",            # speaking-style instruction (inworld-tts-2)
+    "inworld_auto_sync": True,       # add the user's own Inworld voices at start-up
+    "batch_rows": "",                # row selection, e.g. "1-10, 15"
+    "inworld_usage": None,           # see usage.py
+    "defaults_rev": 0,
 }
+
+DEFAULTS_REV = 2
+
+
+def migrate(data: dict) -> dict:
+    """One-time changes to saved settings when the app's defaults change."""
+    rev = int(data.get("defaults_rev") or 0)
+    changes: dict = {}
+    if rev < 2:
+        # 2.2: the default Inworld model became inworld-tts-2-flash
+        changes["model_Inworld"] = "inworld-tts-2-flash"
+    if rev < DEFAULTS_REV:
+        changes["defaults_rev"] = DEFAULTS_REV
+    return changes
 
 
 class ConfigStore:

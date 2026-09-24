@@ -28,13 +28,27 @@ subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=durat
 bg = tmp / "bg.jpg"
 subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=1280x720", "-frames:v", "1", str(bg)], check=True)
 
+SYNTH_CALLS = []
 class FakeProv:
-    def __init__(self, fail_on=None): self.fail_on = fail_on
+    def __init__(self, fail_on=None): self.fail_on = fail_on; self.chars_used = 0
     def synthesize(self, text, vid, out, **kw):
         time.sleep(0.05)
+        SYNTH_CALLS.append((text, kw))
         if "LỖI" in text: raise RuntimeError("Giả lập lỗi API")
-        shutil.copyfile(tone, out); return out
-workers.build_provider = main.build_provider = lambda *a, **k: FakeProv()
+        shutil.copyfile(tone, out); self.chars_used += len(text); return out
+    def list_voices(self):
+        return [
+            {"voice_id": "Sarah", "name": "Sarah", "kind": "Hệ thống", "language": "en-US", "gender": "Nữ",
+             "description": "Support agent", "tags": ["calm"], "source": "SYSTEM"},
+            {"voice_id": "Mai", "name": "Mai", "kind": "Hệ thống", "language": "vi-VN", "gender": "Nữ",
+             "description": "Giọng miền Bắc", "tags": [], "source": "SYSTEM"},
+            {"voice_id": "ws__toi", "name": "Giọng clone của tôi", "kind": "Của tôi", "language": "vi-VN",
+             "gender": "", "description": "", "tags": [], "source": "IVC"},
+        ]
+import dialogs
+workers.build_provider = main.build_provider = dialogs.build_provider = lambda *a, **k: FakeProv()
+# settings from 2.1: old default model, before the 2.2 migration; auto-sync tested explicitly below
+storage.ConfigStore().save({"model_Inworld": "inworld-tts-2", "defaults_rev": 0, "inworld_auto_sync": False})
 
 vs = storage.VoiceStore()
 now = "2026-09-24T10:00:00"
@@ -109,10 +123,118 @@ pump()
 assert w.batch_state.count("skipped") == 5, w.batch_state
 print("files:", sorted(p.name for p in out.iterdir()))
 
-def shot(name):
+def shot(name, widget=None):
     pump(4)
     if SHOTS:
-        w.grab().save(str(SHOTS / f"{name}.png"))
+        (widget or w).grab().save(str(SHOTS / f"{name}.png"))
+
+def wait_workers(limit=30):
+    t0 = time.time()
+    while any(x.isRunning() for x in list(w.workers)) and time.time() - t0 < limit: pump(2)
+    pump(4)
+
+# ================= 2.2 features
+w.open_path = lambda path: None
+# default model migrated to flash
+assert storage.ConfigStore().load()["model_Inworld"] == "inworld-tts-2-flash"
+w.tts_voice.setCurrentIndex(w.tts_voice.findData("u2")); pump()
+assert w.tts_model.currentText() == "inworld-tts-2-flash", w.tts_model.currentText()
+# Inworld-only options follow the voice / model
+o = w.iw_opts["tts"]
+assert not o["box"].isHidden()
+assert not o["instruction"].isEnabled()
+w.tts_model.setCurrentText("inworld-tts-2"); pump()
+assert o["instruction"].isEnabled()
+w.tts_voice.setCurrentIndex(w.tts_voice.findData("u1")); pump()
+assert o["box"].isHidden()
+w.tts_voice.setCurrentIndex(w.tts_voice.findData("u2")); pump()
+w.tts_model.setCurrentText("inworld-tts-2-flash"); pump()
+
+# usage: budget + TTS run recorded
+w.go(main.PAGE_SETTINGS); pump()
+w.usage_plan.setCurrentIndex(w.usage_plan.findData("creator")); pump()
+assert abs(w.usage_budget.value() - 25.0) < 1e-6, w.usage_budget.value()
+o["delivery"].setCurrentIndex(o["delivery"].findData("CREATIVE")); o["enhance"].setChecked(True)
+w.tts_text.setPlainText("Xin chào thế giới"); w.tts_format.buttons["mp3"].click(); w.tts_filename.setText("dung_thu")
+SYNTH_CALLS.clear()
+c_before = main.usage.summary(storage.ConfigStore().load()["inworld_usage"])["chars"]
+w.start_tts(); wait_workers()
+assert SYNTH_CALLS and SYNTH_CALLS[-1][1]["options"]["delivery"] == "CREATIVE", SYNTH_CALLS[-1:]
+assert SYNTH_CALLS[-1][1]["options"]["enhance"] is True
+su = main.usage.summary(storage.ConfigStore().load()["inworld_usage"])
+assert su["chars"] - c_before == len("Xin chào thế giới") and su["plan"] == "creator", su
+assert "%" in w.chip_usage.text() and "Inworld còn" in w.tts_usage.text(), (w.chip_usage.text(), w.tts_usage.text())
+# options are shared with the batch page
+assert w.iw_opts["batch"]["delivery"].currentData() == "CREATIVE"
+
+# batch: only chosen STT rows run
+w.batch_voice.setCurrentIndex(w.batch_voice.findData("u2")); pump()
+assert "💵" in w.batch_status.text(), w.batch_status.text()
+w.batch_rows.setText("9"); pump()
+assert "vượt ngoài" in w.batch_rows_hint.text() and w._selection_error(), w.batch_rows_hint.text()
+w.batch_rows.setText("2, 5-"); w._batch_load_tasks(); pump()
+assert w.batch_selected == {1, 4, 5}, w.batch_selected
+assert w.batch_state[0] == "unselected" and "Không chạy" in w.batch_table.item(0, main.B_STATUS).text()
+assert w.tile_total.value.text() == "3/6", w.tile_total.value.text()
+out2 = tmp / "out_stt"; w.batch_output_dir.setText(str(out2)); w.batch_skip.setChecked(False)
+w.batch_format.buttons["mp3"].click()
+before = main.usage.summary(storage.ConfigStore().load()["inworld_usage"])["chars"]
+w.start_batch()
+t0 = time.time()
+while (w.batch_worker.isRunning() or not w.batch_run.isEnabled()) and time.time() - t0 < 60: pump(2)
+pump()
+made = sorted(p.name for p in out2.iterdir())
+assert made == ["1_2.mp3", "2.mp3", "6.mp3"], made
+assert w.batch_state == ["unselected", "ok", "unselected", "unselected", "ok", "ok"], w.batch_state
+after = main.usage.summary(storage.ConfigStore().load()["inworld_usage"])["chars"]
+exp = sum(len(w.batch_tasks[i]["text"]) for i in (1, 4, 5))
+assert after - before == exp, (after - before, exp)
+assert storage.ConfigStore().load()["batch_rows"] == "2, 5-"
+
+# voice browser dialog
+dlg = dialogs.ImportVoicesDialog("Inworld", {}, {}, {"Sarah"}, w, kind="Tất cả", preview=lambda v: w._preview_voice(
+    "Inworld", v["voice_id"], v["name"], v.get("language", ""), "pv_" + v["voice_id"]))
+dlg.resize(1100, 560); dlg.show()
+t0 = time.time()
+while not dlg.voices and time.time() - t0 < 10: pump(2)
+pump()
+assert dlg.table.rowCount() == 2, dlg.table.rowCount()   # auto-filtered to vi-VN
+assert dlg.lang.currentData() == "vi-VN"
+dlg.lang.setCurrentIndex(0); pump()
+assert dlg.table.rowCount() == 3
+assert dlg.table.item(0, 0).text().startswith("Giọng clone")    # own voices first
+dlg.search.setText("support"); pump()
+assert dlg.table.rowCount() == 1 and "đã có" in dlg.table.item(0, 0).text()
+dlg.search.setText(""); dlg.gender.setCurrentIndex(dlg.gender.findData("Nữ")); pump()
+assert dlg.table.rowCount() == 2
+shot("dialog_voices", dlg)
+dlg.table.selectRow(1); pump()
+assert dlg.use_btn.isEnabled() and dlg.preview_btn.isEnabled()
+chars0 = main.usage.summary(storage.ConfigStore().load()["inworld_usage"])["chars"]
+dlg._preview(); wait_workers()
+assert main.usage.summary(storage.ConfigStore().load()["inworld_usage"])["chars"] > chars0
+chosen = dlg.selected()[0]
+dlg._use_now(); pump()
+assert dlg.use_now == chosen and dlg.result() == 1
+w._add_voice("Inworld", chosen["voice_id"], chosen["name"], chosen["language"]); w.refresh_voices()
+w.use_voice_id("Inworld", chosen["voice_id"]); pump()
+assert w._voice_from_combo(w.tts_voice)["provider_voice_id"] == chosen["voice_id"]
+
+# sync adds only the user's own voices
+n0 = len(w.voice_store.list())
+w.sync_inworld_voices(silent=True); wait_workers()
+names = [v["local_name"] for v in w.voice_store.list()]
+assert len(names) == n0 + 1 and "Giọng clone của tôi" in names and "Mai" not in names, names
+w.sync_inworld_voices(silent=True); wait_workers()
+assert len(w.voice_store.list()) == n0 + 1
+# new period
+main.QInputDialog.getDouble = staticmethod(lambda *a, **k: (10.0, True))
+w.reset_usage(); pump()
+su = main.usage.summary(storage.ConfigStore().load()["inworld_usage"])
+assert su["chars"] == 0 and su["budget"] == 10.0 and su["plan"] == "creator", su
+w.usage_budget.setValue(25.0); w._usage_settings_changed()
+w._record_usage("Inworld", "inworld-tts-2-flash", 1_000_000)   # $10 of $25 on Creator
+assert "60%" in w.chip_usage.text(), w.chip_usage.text()
 
 w.tts_format.buttons["mp3"].click()
 for mode in ("dark", "light"):

@@ -18,11 +18,12 @@ from PyQt6.QtWidgets import (
     QStackedWidget, QTableWidget, QTableWidgetItem, QTextBrowser, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from storage import APP_DIR, APP_NAME, APP_VERSION, LOG_PATH, ConfigStore, SecretStore, VoiceStore
+from storage import APP_DIR, APP_NAME, APP_VERSION, LOG_PATH, ConfigStore, SecretStore, VoiceStore, migrate
 from theme import ACCENTS, LOG_COLORS, PROVIDER_ACCENT, STATUS_COLORS, build_stylesheet, make_arrow_icons
 from media import VIDEO_SIZES, find_ffmpeg, make_video, probe_duration
-from providers import LANGUAGES, MODELS, SPEED_RANGE, build_provider, language_label
-from utils import fmt_duration, safe_filename, sample_hint, split_text, validate_voice_sample
+from providers import DELIVERY, INSTRUCTION_MODELS, LANGUAGES, MODELS, SPEED_RANGE, build_provider, language_label
+from utils import fmt_duration, parse_row_selection, safe_filename, sample_hint, split_text, validate_voice_sample
+import usage
 from widgets import Card, ChoiceRow, ResponsiveRow, StatTile, button, label
 from workers import BatchWorker, FuncWorker, produce_outputs
 import updater
@@ -34,7 +35,9 @@ PREVIEW_TEXT = {
     "en": "Hello! This is a quick preview of my voice. Have a wonderful day.",
 }
 STATUS_TEXT = {"pending": "⏺ Chờ", "running": "⏳ Đang chạy", "ok": "✅ Xong", "error": "❌ Lỗi",
-               "skipped": "⏭ Bỏ qua", "stopped": "⏹ Đã dừng"}
+               "skipped": "⏭ Bỏ qua", "stopped": "⏹ Đã dừng", "unselected": "· Không chạy lần này"}
+# batch table columns
+B_STT, B_ROW, B_NAME, B_TEXT, B_CHARS, B_STATUS = range(6)
 NAV = [
     ("🧬", "Clone giọng", "violet"),
     ("🗣", "Đọc văn bản", "blue"),
@@ -74,6 +77,9 @@ class MainWindow(QMainWindow):
         self.voice_store = VoiceStore()
         self.secret_store = SecretStore()
         self.config = self.config_store.load()
+        mig = migrate(self.config)
+        if mig:
+            self.config = self.config_store.save(mig)
         self.mode = self.config.get("theme", "dark") if self.config.get("theme") in ("dark", "light") else "dark"
 
         self.workers: set = set()
@@ -85,6 +91,8 @@ class MainWindow(QMainWindow):
         self.batch_map: list[int] = []
         self.last_outputs: list[str] = []
         self.latest_release = None
+        self.batch_selected: set[int] = set()   # 0-based task indexes chosen by the STT filter
+        self.iw_opts: dict[str, dict] = {}
         self.update_worker = None
         self._quitting_for_update = False
 
@@ -100,6 +108,10 @@ class MainWindow(QMainWindow):
         if self.config.get("auto_update", True) and not os.getenv("TTS_SELFCHECK") and not os.getenv("TTS_NO_UPDATE_CHECK"):
             QTimer.singleShot(6000, lambda: self.check_updates(silent=True))
             self.update_timer.start(UPDATE_EVERY_MS)
+        self._refresh_usage()
+        if (self.config.get("inworld_auto_sync", True) and self._secrets()["inworld_api_key"]
+                and not os.getenv("TTS_SELFCHECK")):
+            QTimer.singleShot(2500, lambda: self.sync_inworld_voices(silent=True))
         if not self.voice_store.list():
             self.log("💡 Bắt đầu: vào ⚙ Cài đặt API nhập key → 🧬 Clone giọng (hoặc ☁ lấy giọng từ tài khoản).")
 
@@ -174,7 +186,8 @@ class MainWindow(QMainWindow):
         self.chip_inworld = label("", chip="true")
         self.chip_minimax = label("", chip="true")
         self.chip_voices = label("", chip="true")
-        for c in (self.chip_voices, self.chip_inworld, self.chip_minimax, self.chip_ffmpeg):
+        self.chip_usage = label("", chip="true")
+        for c in (self.chip_usage, self.chip_voices, self.chip_inworld, self.chip_minimax, self.chip_ffmpeg):
             cb.addWidget(c)
         lay.addWidget(self.chip_box, 1)
         self.update_chip = QPushButton("⬆  Có bản mới")
@@ -268,6 +281,85 @@ class MainWindow(QMainWindow):
         outer.addWidget(scroll)
         return page, lay, head
 
+    # ---------------------------------------------------------------- shared voice widgets
+    def _voice_row(self, combo: QComboBox):
+        r = QHBoxLayout()
+        r.setSpacing(6)
+        r.addWidget(combo, 1)
+        r.addWidget(button("☁", size="small", tint="teal",
+                           tip="Duyệt giọng Inworld: lọc ngôn ngữ/giới tính, nghe thử, dùng ngay",
+                           slot=lambda: self.import_voices("Inworld", kind="Tất cả")))
+        return r
+
+    def _iw_options_box(self, key: str, model_combo: QComboBox) -> QWidget:
+        """Inworld-only settings like the Playground: Delivery, audio quality, instruction."""
+        box = QWidget()
+        g = QGridLayout(box)
+        g.setContentsMargins(0, 0, 0, 0)
+        g.setHorizontalSpacing(10)
+        g.setVerticalSpacing(8)
+        delivery = QComboBox()
+        for code, text, _t in DELIVERY:
+            delivery.addItem(text, code)
+        delivery.setToolTip("Giống thanh Delivery trên Inworld Playground:\n"
+                            "Ổn định = đều giọng, ít biến tấu • Cân bằng = mặc định • Sáng tạo = biểu cảm, đa dạng hơn")
+        enhance = QCheckBox("✨ Tăng chất lượng (khử nhiễu)")
+        enhance.setToolTip("Bật enhanceGeneration của Inworld: lọc nhiễu, giảm tạp âm trong audio tạo ra.")
+        instruction = QLineEdit()
+        instruction.setPlaceholderText("Ví dụ: đọc chậm rãi, ấm áp như kể chuyện")
+        instruction.setToolTip("Chỉ dẫn phong cách đọc — chỉ model inworld-tts-2 hỗ trợ.")
+        g.addWidget(label("🎭 Delivery", role="field"), 0, 0)
+        g.addWidget(delivery, 0, 1)
+        ins_label = label("💬 Chỉ dẫn", role="field")
+        g.addWidget(ins_label, 1, 0)
+        g.addWidget(instruction, 1, 1)
+        g.addWidget(enhance, 2, 1)
+        g.setColumnStretch(1, 1)
+        self.iw_opts[key] = {"box": box, "delivery": delivery, "enhance": enhance, "instruction": instruction,
+                             "ins_label": ins_label, "model": model_combo}
+        model_combo.currentTextChanged.connect(lambda _: self._sync_iw_options(key))
+        return box
+
+    def _sync_iw_options(self, key: str):
+        o = self.iw_opts.get(key)
+        if not o:
+            return
+        combo = self.tts_voice if key == "tts" else self.batch_voice
+        voice = self._voice_from_combo(combo)
+        is_iw = bool(voice) and voice.get("provider") == "Inworld"
+        o["box"].setVisible(is_iw)
+        model = o["model"].currentText().strip()
+        ok = model in INSTRUCTION_MODELS
+        o["instruction"].setEnabled(ok)
+        o["ins_label"].setEnabled(ok)
+        o["instruction"].setPlaceholderText("Ví dụ: đọc chậm rãi, ấm áp như kể chuyện" if ok
+                                            else "Chỉ dùng được với model inworld-tts-2")
+        if key == "tts":
+            self._update_counter()
+        elif hasattr(self, "batch_rows_hint"):
+            self._apply_row_selection()
+
+    def _iw_options(self, key: str) -> dict:
+        o = self.iw_opts[key]
+        return {"delivery": o["delivery"].currentData() or "BALANCED", "enhance": o["enhance"].isChecked(),
+                "instruction": o["instruction"].text().strip()}
+
+    def _save_iw_options(self, key: str):
+        o = self._iw_options(key)
+        self.config = self.config_store.save({"iw_delivery": o["delivery"], "iw_enhance": o["enhance"],
+                                              "iw_instruction": o["instruction"]})
+        other = "batch" if key == "tts" else "tts"
+        self._set_iw_options(other, o)
+
+    def _set_iw_options(self, key: str, o: dict):
+        w = self.iw_opts.get(key)
+        if not w:
+            return
+        idx = w["delivery"].findData(o.get("delivery") or "BALANCED")
+        w["delivery"].setCurrentIndex(max(0, idx))
+        w["enhance"].setChecked(bool(o.get("enhance")))
+        w["instruction"].setText(o.get("instruction") or "")
+
     # ---------------------------------------------------------------- clone
     def _page_clone(self):
         page, lay, _ = self._page("🧬", "Clone giọng nói",
@@ -360,14 +452,19 @@ class MainWindow(QMainWindow):
         r2 = QHBoxLayout()
         r2.addWidget(button("➕  Thêm Voice ID", tint="blue", slot=self.add_voice_manual,
                             tip="Thêm Voice ID đã có sẵn (tạo trên web hoặc máy khác)"))
-        r2.addWidget(button("☁  Lấy từ Inworld", tint="teal", slot=lambda: self.import_voices("Inworld"),
-                            tip="Tải danh sách giọng trên tài khoản Inworld của bạn"))
-        r2.addWidget(button("☁  Lấy từ MiniMax", tint="pink", slot=lambda: self.import_voices("MiniMax"),
-                            tip="Tải danh sách giọng trên tài khoản MiniMax của bạn"))
+        r2.addWidget(button("☁  Duyệt giọng Inworld", tint="teal", slot=lambda: self.import_voices("Inworld", kind="Tất cả"),
+                            tip="Xem toàn bộ giọng Inworld (của bạn + hệ thống): lọc, nghe thử, dùng ngay"))
+        r2.addWidget(button("🔄  Đồng bộ Inworld", tint="cyan", slot=lambda: self.sync_inworld_voices(silent=False),
+                            tip="Thêm vào thư viện mọi giọng bạn đã clone/tạo trên Inworld mà app chưa có"))
         r2.addStretch()
-        r2.addWidget(button("🗑  Xóa", tint="red", slot=self.remove_selected_voice,
-                            tip="Chỉ xóa khỏi danh sách trong app, giọng trên tài khoản vẫn còn"))
         lib.add(r2)
+        r3 = QHBoxLayout()
+        r3.addWidget(button("☁  Lấy từ MiniMax", tint="pink", slot=lambda: self.import_voices("MiniMax"),
+                            tip="Tải danh sách giọng trên tài khoản MiniMax của bạn"))
+        r3.addStretch()
+        r3.addWidget(button("🗑  Xóa", tint="red", slot=self.remove_selected_voice,
+                            tip="Chỉ xóa khỏi danh sách trong app, giọng trên tài khoản vẫn còn"))
+        lib.add(r3)
         row.add(lib, 1)
         lay.addWidget(row, 1)
         self.clone_provider.set_value(self.config.get("last_provider", "Inworld"))
@@ -441,7 +538,7 @@ class MainWindow(QMainWindow):
         self.tts_speed.setValue(1.0)
         self.tts_voice_info = label("", role="hint", wrap=True)
         g.addWidget(label("🎤 Giọng", role="field"), 0, 0)
-        g.addWidget(self.tts_voice, 0, 1)
+        g.addLayout(self._voice_row(self.tts_voice), 0, 1)
         g.addWidget(label("🧠 Model", role="field"), 1, 0)
         g.addWidget(self.tts_model, 1, 1)
         g.addWidget(label("⚡ Tốc độ", role="field"), 2, 0)
@@ -449,6 +546,9 @@ class MainWindow(QMainWindow):
         g.addWidget(self.tts_voice_info, 3, 0, 1, 2)
         g.setColumnStretch(1, 1)
         top.add(g)
+        top.add(self._iw_options_box("tts", self.tts_model))
+        self.tts_usage = label("", role="hint", wrap=True)
+        top.add(self.tts_usage)
         right.addWidget(top)
 
         out = Card("Xuất file", "green")
@@ -515,6 +615,16 @@ class MainWindow(QMainWindow):
         sg.addWidget(self.batch_text_col, 2, 1, 1, 2)
         sg.addWidget(label("🏷 Cột tên file", role="field"), 3, 0)
         sg.addWidget(self.batch_name_col, 3, 1, 1, 2)
+        self.batch_rows = QLineEdit()
+        self.batch_rows.setPlaceholderText("Trống = chạy tất cả  •  ví dụ: 1-10, 15, 20-25, 40-")
+        self.batch_rows.setToolTip("Chỉ chạy các dòng có số thứ tự (cột STT trong bảng bên dưới) này.\n"
+                                   "Dùng dấu phẩy để tách, dấu gạch ngang cho khoảng; “40-” = từ 40 đến hết.")
+        self.batch_rows.textChanged.connect(lambda _: self._apply_row_selection())
+        sg.addWidget(label("🔢 Chỉ chạy STT", role="field"), 4, 0)
+        sg.addWidget(self.batch_rows, 4, 1)
+        sg.addWidget(button("✖", size="small", tip="Xóa, chạy tất cả", slot=lambda: self.batch_rows.clear()), 4, 2)
+        self.batch_rows_hint = label("", role="hint", wrap=True)
+        sg.addWidget(self.batch_rows_hint, 5, 1, 1, 2)
         sg.setColumnStretch(1, 1)
         src.add(sg)
         br = QHBoxLayout()
@@ -553,7 +663,7 @@ class MainWindow(QMainWindow):
         self.batch_merge = QCheckBox("Gộp tất cả thành 1 file (thêm file _GOP)")
         self.batch_merge.setToolTip("Ngoài từng file riêng, tạo thêm 1 file gộp theo thứ tự dòng.")
         cg.addWidget(label("🎤 Giọng", role="field"), 0, 0)
-        cg.addWidget(self.batch_voice, 0, 1, 1, 3)
+        cg.addLayout(self._voice_row(self.batch_voice), 0, 1, 1, 3)
         cg.addWidget(label("🧠 Model", role="field"), 1, 0)
         cg.addWidget(self.batch_model, 1, 1)
         cg.addWidget(label("⚡ Tốc độ", role="field"), 1, 2)
@@ -574,6 +684,7 @@ class MainWindow(QMainWindow):
         cg.addWidget(self.batch_merge, 5, 1, 1, 3)
         cg.setColumnStretch(1, 1)
         cfg.add(cg)
+        cfg.add(self._iw_options_box("batch", self.batch_model))
         cfg.body.addStretch()
         row.add(cfg, 1)
         lay.addWidget(row)
@@ -611,16 +722,17 @@ class MainWindow(QMainWindow):
         self.batch_status = label("Chưa chạy.", role="hint")
         lay.addWidget(self.batch_status)
 
-        self.batch_table = QTableWidget(0, 5)
-        self.batch_table.setHorizontalHeaderLabels(["Dòng", "Tên file", "Nội dung", "Ký tự", "Trạng thái"])
+        self.batch_table = QTableWidget(0, 6)
+        self.batch_table.setHorizontalHeaderLabels(["STT", "Dòng Excel", "Tên file", "Nội dung", "Ký tự", "Trạng thái"])
         bh = self.batch_table.horizontalHeader()
-        bh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        bh.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        bh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        bh.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        bh.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        self.batch_table.setColumnWidth(1, 150)
-        self.batch_table.setColumnWidth(4, 260)
+        bh.setSectionResizeMode(B_STT, QHeaderView.ResizeMode.ResizeToContents)
+        bh.setSectionResizeMode(B_ROW, QHeaderView.ResizeMode.ResizeToContents)
+        bh.setSectionResizeMode(B_NAME, QHeaderView.ResizeMode.Interactive)
+        bh.setSectionResizeMode(B_TEXT, QHeaderView.ResizeMode.Stretch)
+        bh.setSectionResizeMode(B_CHARS, QHeaderView.ResizeMode.ResizeToContents)
+        bh.setSectionResizeMode(B_STATUS, QHeaderView.ResizeMode.Interactive)
+        self.batch_table.setColumnWidth(B_NAME, 150)
+        self.batch_table.setColumnWidth(B_STATUS, 260)
         self.batch_table.verticalHeader().setVisible(False)
         self.batch_table.setAlternatingRowColors(True)
         self.batch_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -740,6 +852,11 @@ class MainWindow(QMainWindow):
         iw.add(r)
         self.iw_test_result = label("", role="hint", wrap=True)
         iw.add(self.iw_test_result)
+        self.iw_auto_sync = QCheckBox("🔄  Tự đồng bộ giọng clone từ Inworld khi mở app")
+        self.iw_auto_sync.setToolTip("Mỗi lần mở app, giọng bạn đã clone/tạo trên Inworld mà app chưa có "
+                                     "sẽ tự được thêm vào thư viện.")
+        self.iw_auto_sync.toggled.connect(lambda on: setattr(self, "config", self.config_store.save({"inworld_auto_sync": on})))
+        iw.add(self.iw_auto_sync)
         iw.body.addStretch()
         row.add(iw, 1)
 
@@ -775,6 +892,7 @@ class MainWindow(QMainWindow):
         mm.body.addStretch()
         row.add(mm, 1)
         lay.addWidget(row)
+        lay.addWidget(self._usage_card())
 
         bottom = Card("Lưu & dữ liệu", "amber")
         br = QHBoxLayout()
@@ -789,6 +907,147 @@ class MainWindow(QMainWindow):
         lay.addWidget(bottom)
         lay.addStretch()
         return page
+
+    def _usage_card(self):
+        card = Card("💳  Gói & mức dùng Inworld", "violet",
+                    "Inworld chưa có API để đọc số dư, nên app tự cộng số ký tự Inworld báo đã xử lý sau mỗi lần "
+                    "đọc và tính tiền theo bảng giá của gói. Nhập số dư đang thấy ở trang Billing để app tính phần còn lại.")
+        g = QGridLayout()
+        g.setHorizontalSpacing(10)
+        g.setVerticalSpacing(8)
+        self.usage_plan = QComboBox()
+        for code, lbl, _fee, _cr in usage.PLANS:
+            self.usage_plan.addItem(lbl, code)
+        self.usage_plan.setToolTip("Gói đang dùng trên Inworld (xem ở Billing › Plan). Quyết định giá mỗi ký tự.")
+        self.usage_budget = QDoubleSpinBox()
+        self.usage_budget.setRange(0, 1_000_000)
+        self.usage_budget.setDecimals(2)
+        self.usage_budget.setPrefix("$ ")
+        self.usage_budget.setToolTip("Số dư (credit) đầu kỳ hiện ở đầu trang Billing của Inworld.")
+        self.usage_plan.currentIndexChanged.connect(lambda _: self._usage_settings_changed())
+        self.usage_budget.editingFinished.connect(self._usage_settings_changed)
+        g.addWidget(label("📦 Gói", role="field"), 0, 0)
+        g.addWidget(self.usage_plan, 0, 1)
+        g.addWidget(label("💰 Số dư đầu kỳ", role="field"), 0, 2)
+        g.addWidget(self.usage_budget, 0, 3)
+        g.setColumnStretch(1, 1)
+        g.setColumnStretch(3, 1)
+        card.add(g)
+
+        self.u_tile_chars = StatTile("Ký tự đã dùng", "blue", "🔤")
+        self.u_tile_spent = StatTile("Tiền đã dùng", "orange", "💸")
+        self.u_tile_left = StatTile("Tiền còn lại", "green", "💰")
+        self.u_tile_chars_left = StatTile("Ký tự còn lại (ước tính)", "violet", "🧮")
+        tiles = ResponsiveRow(1060, spacing=10)      # 4 in a row when wide, 2 × 2 when narrow
+        self.responsive.append(tiles)
+        for pair in ((self.u_tile_chars, self.u_tile_spent), (self.u_tile_left, self.u_tile_chars_left)):
+            holder = QWidget()
+            hl = QHBoxLayout(holder)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.setSpacing(10)
+            for t in pair:
+                t.setMinimumWidth(0)
+                hl.addWidget(t, 1)
+            tiles.add(holder, 1)
+        card.add(tiles)
+        self.usage_bar = QProgressBar()
+        self.usage_bar.setRange(0, 1000)
+        card.add(self.usage_bar)
+        self.usage_detail = label("", role="hint", wrap=True)
+        self.usage_detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        card.add(self.usage_detail)
+        r = QHBoxLayout()
+        r.addWidget(button("🔗 Mở Billing", tint="violet", tip="Xem gói và số dư thật trên Inworld",
+                           slot=lambda: QDesktopServices.openUrl(QUrl(usage.BILLING_URL))))
+        r.addWidget(button("📈 Mở Usage", tint="blue", tip="Xem biểu đồ sử dụng thật trên Inworld",
+                           slot=lambda: QDesktopServices.openUrl(QUrl(usage.USAGE_URL))))
+        r.addStretch()
+        r.addWidget(button("♻ Bắt đầu kỳ mới", tint="amber", slot=self.reset_usage,
+                           tip="Đặt lại bộ đếm (ví dụ đầu tháng hoặc sau khi nạp thêm) và nhập số dư mới"))
+        card.add(r)
+        return card
+
+    def _usage_data(self) -> dict:
+        return usage.normalize(self.config.get("inworld_usage"))
+
+    def _usage_settings_changed(self):
+        d = self._usage_data()
+        plan = self.usage_plan.currentData() or "on_demand"
+        d["plan"] = plan
+        d["budget"] = float(self.usage_budget.value()) or usage.PLAN_CREDITS.get(plan, 0.0)
+        self.config = self.config_store.save({"inworld_usage": d})
+        self._refresh_usage()
+
+    def reset_usage(self):
+        plan = self.usage_plan.currentData() or "on_demand"
+        cur = self.usage_budget.value() or usage.PLAN_CREDITS.get(plan, 0.0)
+        val, ok = QInputDialog.getDouble(
+            self, "Bắt đầu kỳ mới",
+            "Bộ đếm ký tự và tiền sẽ về 0.\nNhập số dư (credit) đang thấy ở trang Billing của Inworld ($):",
+            float(cur), 0, 1_000_000, 2)
+        if not ok:
+            return
+        self.config = self.config_store.save({"inworld_usage": usage.new_period(plan, val)})
+        self.log(f"♻ Bắt đầu kỳ theo dõi Inworld mới: {usage.PLAN_LABEL[plan]}, số dư {usage.fmt_usd(val)}.")
+        self._refresh_usage()
+
+    def _record_usage(self, provider: str, model: str, chars: int):
+        """Main thread only: add billed characters to the Inworld tally."""
+        if provider != "Inworld" or not chars:
+            return
+        self.config = self.config_store.save({"inworld_usage": usage.record(self._usage_data(), model, chars)})
+        self._refresh_usage()
+
+    def _refresh_usage(self):
+        if not hasattr(self, "usage_plan"):
+            return
+        d = self._usage_data()
+        model = self.tts_model.currentText() if self.tts_model.currentText().startswith("inworld") else usage.DEFAULT_MODEL
+        su = usage.summary(d, model)
+        for w in (self.usage_plan, self.usage_budget):
+            w.blockSignals(True)
+        self.usage_plan.setCurrentIndex(max(0, self.usage_plan.findData(su["plan"])))
+        self.usage_budget.setValue(su["budget"])
+        for w in (self.usage_plan, self.usage_budget):
+            w.blockSignals(False)
+        self.u_tile_chars.set(usage.fmt_int(su["chars"]))
+        self.u_tile_spent.set(usage.fmt_usd(su["spent"]))
+        if su["budget"] > 0:
+            self.u_tile_left.set(f"{usage.fmt_usd(su['remaining'])}  ({su['left_pct']:.0f}%)")
+            self.u_tile_chars_left.set("~" + usage.fmt_int(su["chars_left"]))
+            self.usage_bar.setValue(int(round(su["left_pct"] * 10)))
+            self.usage_bar.setFormat(f"Còn {su['left_pct']:.1f}%  •  đã dùng {su['used_pct']:.1f}%")
+            accent = "green" if su["left_pct"] > 30 else ("amber" if su["left_pct"] > 10 else "red")
+        else:
+            self.u_tile_left.set("—")
+            self.u_tile_chars_left.set("—")
+            self.usage_bar.setValue(0)
+            self.usage_bar.setFormat("Nhập số dư đầu kỳ để xem % còn lại")
+            accent = "amber"
+        if self.usage_bar.property("accent") != accent:
+            self.usage_bar.setProperty("accent", accent)
+            st = self.usage_bar.style()
+            st.unpolish(self.usage_bar)
+            st.polish(self.usage_bar)
+        since = (su["since"] or "").replace("T", " ")[:16]
+        parts = [f"📦 {su['plan_label']}  •  tính từ {since}  •  {su['requests']} lần đọc",
+                 f"💵 Giá {model}: {usage.fmt_usd(su['rate'])} / 1 triệu ký tự"]
+        if su["by_model"]:
+            parts.append("🧠 " + "  •  ".join(f"{m}: {usage.fmt_int(c)} ký tự ({usage.fmt_usd(v)})"
+                                                 for m, c, v in su["by_model"]))
+        parts.append("ℹ Số liệu do app tự tính, chỉ gồm các lần đọc từ app này; đối chiếu với trang Billing để chính xác.")
+        self.usage_detail.setText("\n".join(parts))
+        # header chip + TTS page line
+        if su["budget"] > 0:
+            self.chip_usage.setText(f"💳 Inworld còn {su['left_pct']:.0f}%")
+            self.chip_usage.setToolTip(f"Còn {usage.fmt_usd(su['remaining'])} / {usage.fmt_usd(su['budget'])} "
+                                       f"• ~{usage.fmt_int(su['chars_left'])} ký tự ({model})")
+        else:
+            self.chip_usage.setText(f"💳 {usage.fmt_usd(su['spent'])}")
+            self.chip_usage.setToolTip("Đã dùng trên Inworld (app tự tính). Nhập số dư ở ⚙ Cài đặt API để xem % còn lại.")
+        self._usage_chip_on = bool(su["chars"] or su["budget"])
+        self._apply_responsive()
+        self._update_counter()
 
     # ---------------------------------------------------------------- guide
     def _page_update(self):
@@ -1030,14 +1289,20 @@ class MainWindow(QMainWindow):
                    "Vào <b>Cài đặt API</b>, dán key của Inworld và/hoặc MiniMax, bấm <b>🔌 Kiểm tra kết nối</b> rồi <b>💾 Lưu</b>.")
             + step(2, c["violet"], "🧬 Tạo giọng",
                    "Trang <b>Clone giọng</b>: chọn nhà cung cấp, chọn file mẫu (1 người nói, rõ, không nhạc), đặt tên, "
-                   "tích xác nhận quyền rồi bấm <b>Bắt đầu Clone</b>. Đã có giọng trên tài khoản? Bấm <b>☁ Lấy từ tài khoản</b>.")
+                   "tích xác nhận quyền rồi bấm <b>Bắt đầu Clone</b>. Muốn xem giọng trên Inworld? Bấm <b>☁ Duyệt giọng Inworld</b> "
+                   "(lọc ngôn ngữ, giới tính, nghe thử, <b>Dùng ngay</b>) hoặc <b>🔄 Đồng bộ Inworld</b> để thêm mọi giọng bạn đã clone.")
             + step(3, c["blue"], "🗣 Đọc văn bản",
                    "Chọn giọng, dán nội dung, chọn <b>MP3</b>, <b>MP4</b> hoặc <b>Cả hai</b> rồi bấm <b>🔊 Tạo giọng đọc</b>. "
-                   "Văn bản dài được tự chia đoạn và ghép liền mạch.")
+                   "Văn bản dài được tự chia đoạn và ghép liền mạch. Với Inworld có thêm <b>🎭 Delivery</b> (Ổn định / Cân bằng / "
+                   "Sáng tạo), <b>✨ khử nhiễu</b> và <b>💬 chỉ dẫn</b> phong cách đọc (model inworld-tts-2).")
             + step(4, c["green"], "📊 Hàng loạt từ Excel",
                    "Dòng đầu là tiêu đề, ví dụ cột <b>filename</b> và <b>text</b> (bấm <b>📥 Tạo file Excel mẫu</b>). "
                    "Chọn cột, bấm <b>🚀 Chạy hàng loạt</b>. Bật <b>⏭ Bỏ qua dòng đã có file</b> để chạy tiếp khi bị ngắt; "
-                   "bật <b>🔗 Gộp</b> để có thêm 1 file tổng.")
+                   "bật <b>🔗 Gộp</b> để có thêm 1 file tổng. Chỉ muốn chạy vài dòng? Gõ vào <b>🔢 Chỉ chạy STT</b>, "
+                   "ví dụ <code>1-10, 15, 20-</code> (số STT ở cột đầu bảng).")
+            + f"<p style='color:{c['violet']}'><b>💳 Gói & số dư Inworld:</b> ở <b>Cài đặt API</b>, chọn gói và nhập số dư đang thấy "
+              "trên trang Billing. App tự cộng số ký tự đã dùng, tính tiền, hiện phần còn lại theo % (nút <b>💳</b> trên thanh "
+              "tiêu đề). Đầu tháng hoặc sau khi nạp tiền, bấm <b>♻ Bắt đầu kỳ mới</b>.</p>"
             + f"<p style='color:{c['pink']}'><b>🎬 Video MP4:</b> chọn ảnh nền và khung hình ở trang <b>Video MP4</b>. "
               "Video = ảnh tĩnh + giọng đọc, chuẩn H.264/AAC phát được trên YouTube, Facebook, TikTok.</p>"
             + f"<p style='color:{c['teal']}'><b>🔄 Cập nhật:</b> ứng dụng tự kiểm tra bản mới khi mở. Có bản mới sẽ hiện nút "
@@ -1146,6 +1411,15 @@ class MainWindow(QMainWindow):
         self.batch_threads.setValue(int(c.get("batch_threads", 2) or 2))
         self.batch_skip.setChecked(bool(c.get("batch_skip_existing", True)))
         self.batch_merge.setChecked(bool(c.get("batch_merge_all", False)))
+        self.iw_auto_sync.blockSignals(True)
+        self.iw_auto_sync.setChecked(bool(c.get("inworld_auto_sync", True)))
+        self.iw_auto_sync.blockSignals(False)
+        opts = {"delivery": c.get("iw_delivery"), "enhance": c.get("iw_enhance"), "instruction": c.get("iw_instruction")}
+        for key in ("tts", "batch"):
+            self._set_iw_options(key, opts)
+        self.batch_rows.blockSignals(True)
+        self.batch_rows.setText(c.get("batch_rows", "") or "")
+        self.batch_rows.blockSignals(False)
         if c.get("video_size") in VIDEO_SIZES:
             self.video_size.setCurrentText(c["video_size"])
         self.video_color = c.get("video_color", "#101828") or "#101828"
@@ -1329,6 +1603,7 @@ class MainWindow(QMainWindow):
             info.setText("")
             speed.setEnabled(False)
             model_combo.setEnabled(False)
+            self._sync_iw_options("tts" if combo is self.tts_voice else "batch")
             return
         prov = voice.get("provider", "Inworld")
         model_combo.setEnabled(True)
@@ -1344,6 +1619,7 @@ class MainWindow(QMainWindow):
         speed.setValue(float(self.config.get(f"speed_{prov}", 1.0)))
         info.setText(f"🌐 {language_label(prov, voice.get('language'))}   •   ⚡ tốc độ {lo}–{hi}×")
         info.setToolTip("Voice ID: " + voice.get("provider_voice_id", ""))
+        self._sync_iw_options("tts" if combo is self.tts_voice else "batch")
 
     def _voice_from_combo(self, combo):
         uid = combo.currentData()
@@ -1418,7 +1694,7 @@ class MainWindow(QMainWindow):
             else:
                 QMessageBox.information(self, "Đã có", "Voice ID này đã có trong thư viện.")
 
-    def import_voices(self, provider: str):
+    def import_voices(self, provider: str, kind: str = "Của tôi"):
         from dialogs import ImportVoicesDialog
 
         secrets = self._secrets()
@@ -1427,35 +1703,108 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Thiếu API key", f"Hãy nhập API key {provider} ở trang Cài đặt trước.")
             return
         existing = {v.get("provider_voice_id") for v in self.voice_store.list() if v.get("provider") == provider}
-        dlg = ImportVoicesDialog(provider, secrets, self._live_config(), existing, self)
+
+        def preview(v):
+            self._preview_voice(provider, v["voice_id"], v["name"], v.get("language", ""),
+                                f"{provider}_{v['voice_id']}"[:80])
+
+        dlg = ImportVoicesDialog(provider, secrets, self._live_config(), existing, self, kind=kind, preview=preview)
         if dlg.exec():
             added = 0
             for v in dlg.selected():
-                if self._add_voice(provider, v["voice_id"], v["name"], v.get("language", "")
-                                   if provider == "Inworld" else "auto", {"imported": True}):
+                if self._add_voice(provider, v["voice_id"], v["name"], self._import_lang(provider, v),
+                                   {"imported": True}):
                     added += 1
             self.refresh_voices()
-            self.log(f"✅ Đã thêm {added} giọng từ tài khoản {provider}.")
+            if added:
+                self.log(f"✅ Đã thêm {added} giọng từ tài khoản {provider}.")
+            if dlg.use_now:
+                self.use_voice_id(provider, dlg.use_now["voice_id"])
+
+    @staticmethod
+    def _import_lang(provider: str, v: dict) -> str:
+        return v.get("language", "") if provider == "Inworld" else "auto"
+
+    def use_voice_id(self, provider: str, voice_id: str):
+        """Select a library voice (by provider id) on the TTS and batch pages."""
+        uid = next((v["uid"] for v in self.voice_store.list()
+                    if v.get("provider") == provider and v.get("provider_voice_id") == voice_id), None)
+        if not uid:
+            return
+        for combo in (self.tts_voice, self.batch_voice):
+            idx = combo.findData(uid)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        name = self.voice_store.get(uid).get("local_name", voice_id)
+        self.log(f"🎤 Đã chọn giọng: {name}")
+        if self.stack.currentIndex() not in (PAGE_TTS, PAGE_BATCH):
+            self.go(PAGE_TTS)
+
+    def sync_inworld_voices(self, silent: bool = False):
+        """Add every voice the user owns on Inworld that the library does not have yet."""
+        secrets = self._secrets()
+        if not secrets["inworld_api_key"]:
+            if not silent:
+                self.go(PAGE_SETTINGS)
+                QMessageBox.warning(self, "Thiếu API key", "Hãy nhập API key Inworld ở trang Cài đặt trước.")
+            return
+        cfg = self._live_config()
+        if not silent:
+            self.log("🔄 Đang đồng bộ giọng từ Inworld…")
+
+        def job(log, cancelled, progress):
+            return build_provider("Inworld", secrets, cfg).list_voices()
+
+        def ok(voices):
+            added = [v for v in voices if v.get("kind") == "Của tôi"
+                     and self._add_voice("Inworld", v["voice_id"], v["name"], v.get("language", ""),
+                                         {"imported": True, "synced": True})]
+            if added:
+                self.refresh_voices()
+                self.log(f"🔄 Đồng bộ Inworld: thêm {len(added)} giọng mới — " + ", ".join(v["name"] for v in added[:8])
+                         + ("…" if len(added) > 8 else ""))
+            elif not silent:
+                self.log("🔄 Đồng bộ Inworld: thư viện đã có đủ giọng của bạn.")
+            if not silent:
+                mine = sum(1 for v in voices if v.get("kind") == "Của tôi")
+                QMessageBox.information(self, "Đồng bộ Inworld",
+                                        f"Tài khoản có {mine} giọng của bạn.\nĐã thêm mới: {len(added)}.")
+
+        def bad(err):
+            self.log(("⚠ Tự đồng bộ Inworld không thành công: " if silent else "❌ Đồng bộ Inworld lỗi: ") + err)
+            if not silent:
+                QMessageBox.critical(self, "Đồng bộ Inworld", err)
+
+        self._run(job, ok, bad)
 
     def preview_selected_voice(self):
         v = self._selected_voice()
         if not v:
             return
         prov = v["provider"]
-        lang = (v.get("language") or "").lower()
+        self._preview_voice(prov, v["provider_voice_id"], v.get("local_name", ""), v.get("language", ""),
+                            f"{safe_filename(v.get('local_name', 'voice'))}_{v['uid'][:6]}")
+
+    def _preview_voice(self, prov: str, voice_id: str, name: str, language: str, stem: str):
+        lang = (language or "").lower()
         text = PREVIEW_TEXT["en"] if lang.startswith("en") or lang == "english" else PREVIEW_TEXT["vi"]
-        out = APP_DIR / "preview" / f"{safe_filename(v.get('local_name', 'voice'))}_{v['uid'][:6]}.mp3"
+        out = APP_DIR / "preview" / f"{safe_filename(stem)}.mp3"
         out.parent.mkdir(parents=True, exist_ok=True)
         secrets, cfg = self._secrets(), self._live_config()
-        model = MODELS[prov][0]
-        self.log(f"▶ Đang tạo câu nghe thử cho “{v.get('local_name')}”…")
+        model = self.config.get(f"model_{prov}") or MODELS[prov][0]
+        if model not in MODELS[prov]:
+            model = MODELS[prov][0]
+        options = {k: self.config.get(f"iw_{k}") for k in ("delivery", "enhance", "instruction")} if prov == "Inworld" else {}
+        self.log(f"▶ Đang tạo câu nghe thử cho “{name}” ({model})…")
 
         def job(log, cancelled, progress):
-            build_provider(prov, secrets, cfg, log=log).synthesize(
-                text, v["provider_voice_id"], str(out), model=model, language=v.get("language", ""))
-            return str(out)
+            p = build_provider(prov, secrets, cfg, log=log)
+            p.synthesize(text, voice_id, str(out), model=model, language=language, options=options)
+            return str(out), p.chars_used
 
-        def ok(path):
+        def ok(res):
+            path, chars = res
+            self._record_usage(prov, model, chars)
             self.log(f"✅ Nghe thử: {path}")
             self.open_path(path)
 
@@ -1565,8 +1914,37 @@ class MainWindow(QMainWindow):
         limit = 1800 if not voice or voice.get("provider") == "Inworld" else 5000
         parts = len(split_text(text, limit)) if n else 0
         secs = n / 14.0
-        self.tts_counter.setText(f"🔤 {n:,} ký tự   •   🧩 {parts} đoạn gửi API   •   ⏱ ước tính ~{fmt_duration(secs)}"
-                                 .replace(",", "."))
+        line = (f"🔤 {n:,} ký tự   •   🧩 {parts} đoạn gửi API   •   ⏱ ước tính ~{fmt_duration(secs)}"
+                .replace(",", "."))
+        if voice and voice.get("provider") == "Inworld" and hasattr(self, "tts_usage"):
+            model = self.tts_model.currentText().strip() or MODELS["Inworld"][0]
+            d = self._usage_data()
+            if n:
+                cost = usage.fmt_usd(usage.cost_of(n, model, d["plan"]))
+                line += f"   •   💵 {'' if cost.startswith('<') else '~'}{cost}"
+            su = usage.summary(d, model)
+            if su["budget"] > 0:
+                self.tts_usage.setText(f"💳 Inworld còn {usage.fmt_usd(su['remaining'])} ({su['left_pct']:.0f}%)  •  "
+                                       f"~{usage.fmt_int(su['chars_left'])} ký tự với {model}")
+            else:
+                self.tts_usage.setText(f"💳 Đã dùng {usage.fmt_usd(su['spent'])} ({usage.fmt_int(su['chars'])} ký tự)  •  "
+                                       "nhập số dư ở ⚙ Cài đặt API để xem % còn lại")
+            self.tts_usage.show()
+        elif hasattr(self, "tts_usage"):
+            self.tts_usage.hide()
+        self.tts_counter.setText(line)
+
+    @staticmethod
+    def _opts_text(options: dict) -> str:
+        if not options:
+            return ""
+        label_of = {code: text.split(" ", 1)[-1] for code, text, _t in DELIVERY}
+        out = f", {label_of.get(options.get('delivery') or 'BALANCED', 'Cân bằng')}"
+        if options.get("enhance"):
+            out += ", khử nhiễu"
+        if options.get("instruction"):
+            out += f", chỉ dẫn “{options['instruction'][:40]}”"
+        return out
 
     def _paste_text(self):
         t = QGuiApplication.clipboard().text()
@@ -1622,20 +2000,33 @@ class MainWindow(QMainWindow):
         self.config = self.config_store.save({"last_output_dir": outdir, f"model_{prov}": model,
                                               f"speed_{prov}": speed})
         cfg, video = self._live_config(), self._video_settings()
+        options = self._iw_options("tts") if prov == "Inworld" else {}
+        if options:
+            self._save_iw_options("tts")
+            if model not in INSTRUCTION_MODELS:
+                options["instruction"] = ""
+        partial: list[int] = []
 
         self.tts_generate.setEnabled(False)
         self.tts_generate.setText("⏳   Đang tạo…")
         self.tts_stop.setEnabled(True)
         self.tts_progress.setValue(0)
         self.tts_result.setText("")
-        self.log(f"🔊 Tạo giọng đọc “{stem}” bằng {voice.get('local_name')} ({prov}, {model}, {speed:.2f}×) — {len(text)} ký tự")
+        self.log(f"🔊 Tạo giọng đọc “{stem}” bằng {voice.get('local_name')} ({prov}, {model}, {speed:.2f}×"
+                 f"{self._opts_text(options)}) — {len(text)} ký tự")
 
         def job(log, cancelled, progress):
             p = build_provider(prov, secrets, cfg, log=log, cancel=cancelled)
-            return produce_outputs(provider=p, text=text, voice=voice, model=model, speed=speed, out_dir=outdir,
-                                   name=stem, fmt=fmt, video=video, log=log, cancelled=cancelled, progress=progress)
+            try:
+                return produce_outputs(provider=p, text=text, voice=voice, model=model, speed=speed, out_dir=outdir,
+                                       name=stem, fmt=fmt, video=video, log=log, cancelled=cancelled,
+                                       progress=progress, options=options)
+            except BaseException as exc:
+                partial.append(int(getattr(exc, "chars_billed", 0) or 0))
+                raise
 
         def ok(res):
+            self._record_usage(prov, model, res.get("chars", 0))
             files = [p for p in (res["mp3"], res["mp4"]) if p]
             self.last_outputs = files
             dur = probe_duration(res["audio"])
@@ -1647,6 +2038,7 @@ class MainWindow(QMainWindow):
             self.log(f"✅ Đã tạo: {names} ({fmt_duration(dur)})")
 
         def bad(err):
+            self._record_usage(prov, model, sum(partial))
             self.tts_progress.setValue(0)
             self.tts_result.setText("❌ " + err)
             self.tts_result.setStyleSheet(f"color:{STATUS_COLORS[self.mode]['error']}; font-weight:600;")
@@ -1802,36 +2194,87 @@ class MainWindow(QMainWindow):
         t = self.batch_table
         t.setRowCount(len(self.batch_tasks))
         for i, task in enumerate(self.batch_tasks):
+            task["stt"] = i + 1
             preview = task["text"].replace("\n", " ")
-            vals = [str(task["row_no"]), task["filename"], preview[:160] + ("…" if len(preview) > 160 else ""),
+            vals = [str(i + 1), str(task["row_no"]), task["filename"],
+                    preview[:160] + ("…" if len(preview) > 160 else ""),
                     f"{len(task['text']):,}".replace(",", "."), ""]
             for c, val in enumerate(vals):
                 it = QTableWidgetItem(val)
-                if c == 2:
+                if c == B_TEXT:
                     it.setToolTip(task["text"][:1500])
-                if c in (0, 3):
+                if c in (B_STT, B_ROW, B_CHARS):
                     it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if c == B_STT:
+                    f = it.font()
+                    f.setBold(True)
+                    it.setFont(f)
                 t.setItem(i, c, it)
-            self._paint_batch_status(i, "pending", "")
-        self._update_tiles()
         self.batch_progress.setValue(0)
         self.batch_retry.setEnabled(False)
-        if self.batch_path:
-            chars = sum(len(x["text"]) for x in self.batch_tasks)
-            self.batch_status.setText(f"Sẵn sàng: {len(self.batch_tasks)} dòng có nội dung • ~{fmt_duration(chars / 14)} audio.")
+        self._apply_row_selection()
+
+    def _selection_error(self) -> str:
+        try:
+            parse_row_selection(self.batch_rows.text(), len(self.batch_tasks))
+            return ""
+        except ValueError as exc:
+            return str(exc)
+
+    def _apply_row_selection(self):
+        """Read the STT filter, mark rows that will not run, update the hint and tiles."""
+        n = len(self.batch_tasks)
+        err = ""
+        try:
+            chosen = parse_row_selection(self.batch_rows.text(), n) if n else []
+        except ValueError as exc:
+            err, chosen = str(exc), []
+        self.batch_selected = {k - 1 for k in chosen}
+        running = bool(self.batch_worker and self.batch_worker.isRunning())
+        for i in range(n):
+            if running:
+                break
+            if self.batch_state[i] in ("pending", "unselected"):
+                self.batch_state[i] = "pending" if (i in self.batch_selected or err) else "unselected"
+                self._paint_batch_status(i, self.batch_state[i], "")
+        sc = STATUS_COLORS[self.mode]
+        if err:
+            self.batch_rows_hint.setText("⚠ " + err)
+            self.batch_rows_hint.setStyleSheet(f"color:{sc['error']};")
+        elif self.batch_rows.text().strip():
+            self.batch_rows_hint.setText(f"→ Sẽ chạy {len(chosen)}/{n} dòng.")
+            self.batch_rows_hint.setStyleSheet(f"color:{sc['ok']};")
+        else:
+            self.batch_rows_hint.setText("")
+            self.batch_rows_hint.setStyleSheet("")
+        self._update_tiles()
+        if self.batch_path and not running:
+            chars = sum(len(self.batch_tasks[i]["text"]) for i in self.batch_selected)
+            msg = f"Sẵn sàng: {len(self.batch_selected)}/{n} dòng • ~{fmt_duration(chars / 14)} audio"
+            voice = self._voice_from_combo(self.batch_voice)
+            if voice and voice.get("provider") == "Inworld" and chars:
+                model = self.batch_model.currentText().strip() or MODELS["Inworld"][0]
+                cost = usage.cost_of(chars, model, self._usage_data()["plan"])
+                msg += f" • 💵 ~{usage.fmt_usd(cost)} ({model})"
+            self.batch_status.setText(msg + ".")
 
     def _paint_batch_status(self, i: int, state: str, detail: str | None):
         if i >= self.batch_table.rowCount():
             return
-        it = self.batch_table.item(i, 4)
+        it = self.batch_table.item(i, B_STATUS)
         if it is None:
             it = QTableWidgetItem()
-            self.batch_table.setItem(i, 4, it)
+            self.batch_table.setItem(i, B_STATUS, it)
         if detail is not None:
             txt = STATUS_TEXT.get(state, state) + (f"  {detail}" if detail and state != "pending" else "")
             it.setText(txt)
             it.setToolTip(detail or "")
-        it.setForeground(QColor(STATUS_COLORS[self.mode].get(state, STATUS_COLORS[self.mode]["pending"])))
+        color = STATUS_COLORS[self.mode].get(state, STATUS_COLORS[self.mode]["pending"])
+        it.setForeground(QColor(color))
+        stt = self.batch_table.item(i, B_STT)
+        if stt is not None:
+            stt.setForeground(QColor(STATUS_COLORS[self.mode]["pending"] if state == "unselected"
+                                     else self.batch_table.palette().text().color()))
         f = it.font()
         f.setBold(state in ("ok", "error", "running"))
         it.setFont(f)
@@ -1842,8 +2285,11 @@ class MainWindow(QMainWindow):
         self.tile_ok.set(st.count("ok"))
         self.tile_err.set(st.count("error"))
         self.tile_skip.set(st.count("skipped"))
-        chars = sum(len(t["text"]) for t in self.batch_tasks)
+        sel = self.batch_selected if self.batch_selected or not self.batch_tasks else set()
+        chars = sum(len(self.batch_tasks[i]["text"]) for i in sel if i < len(self.batch_tasks))
         self.tile_chars.set(f"{chars:,}".replace(",", "."))
+        if len(sel) != len(st):
+            self.tile_total.set(f"{len(sel)}/{len(st)}")
 
     def create_sample_excel(self):
         from openpyxl import Workbook
@@ -1892,11 +2338,22 @@ class MainWindow(QMainWindow):
         if not self.batch_tasks:
             QMessageBox.warning(self, "Chưa có dữ liệu", "Hãy chọn file Excel có ít nhất 1 dòng nội dung.")
             return
-        indices = [i for i, s in enumerate(self.batch_state) if s in ("error", "stopped")] if only_failed \
-            else list(range(len(self.batch_tasks)))
-        if not indices:
-            QMessageBox.information(self, "Không có dòng lỗi", "Không có dòng nào cần chạy lại.")
-            return
+        if only_failed:
+            indices = [i for i, s in enumerate(self.batch_state) if s in ("error", "stopped")]
+            if not indices:
+                QMessageBox.information(self, "Không có dòng lỗi", "Không có dòng nào cần chạy lại.")
+                return
+        else:
+            err = self._selection_error()
+            if err:
+                QMessageBox.warning(self, "Số thứ tự không hợp lệ", err)
+                self.batch_rows.setFocus()
+                return
+            self._apply_row_selection()
+            indices = sorted(self.batch_selected)
+            if not indices:
+                QMessageBox.warning(self, "Chưa chọn dòng", "Không có dòng nào được chọn để chạy.")
+                return
         out_dir = self.batch_output_dir.text().strip()
         if not out_dir:
             QMessageBox.warning(self, "Thiếu thư mục", "Hãy chọn thư mục lưu file.")
@@ -1921,8 +2378,13 @@ class MainWindow(QMainWindow):
         self.config = self.config_store.save({
             "batch_output_dir": out_dir, "batch_threads": self.batch_threads.value(),
             "batch_skip_existing": self.batch_skip.isChecked(), "batch_merge_all": self.batch_merge.isChecked(),
-            f"model_{prov}": model, f"speed_{prov}": speed,
+            f"model_{prov}": model, f"speed_{prov}": speed, "batch_rows": self.batch_rows.text().strip(),
         })
+        options = self._iw_options("batch") if prov == "Inworld" else {}
+        if options:
+            self._save_iw_options("batch")
+            if model not in INSTRUCTION_MODELS:
+                options["instruction"] = ""
         self.batch_map = indices
         for i in indices:
             self.batch_state[i] = "pending"
@@ -1936,17 +2398,20 @@ class MainWindow(QMainWindow):
         self.batch_retry.setEnabled(False)
         self.batch_stop.setEnabled(True)
         self.batch_run.setText("⏳   Đang chạy…")
-        self.log(f"🚀 Chạy {'lại ' if only_failed else ''}{len(indices)} dòng bằng {voice.get('local_name')} "
-                 f"({prov}, {model}, {speed:.2f}×, {self.batch_threads.value()} luồng, định dạng {fmt.upper()})")
+        picked = "" if only_failed or len(indices) == len(self.batch_tasks) else f" (STT {self.batch_rows.text().strip()})"
+        self.log(f"🚀 Chạy {'lại ' if only_failed else ''}{len(indices)} dòng{picked} bằng {voice.get('local_name')} "
+                 f"({prov}, {model}, {speed:.2f}×{self._opts_text(options)}, {self.batch_threads.value()} luồng, "
+                 f"định dạng {fmt.upper()})")
 
         self.batch_worker = BatchWorker(
             tasks=[self.batch_tasks[i] for i in indices], voice=voice, model=model, speed=speed, out_dir=out_dir,
             fmt=fmt, video=self._video_settings(), threads=self.batch_threads.value(),
             skip_existing=self.batch_skip.isChecked(), merge_all=merge,
             merge_name=safe_filename(Path(self.batch_path).stem + "_GOP"),
-            secrets=secrets, config=self._live_config(), parent=self,
+            secrets=secrets, config=self._live_config(), options=options, parent=self,
         )
         self.batch_worker.log.connect(self.log)
+        self.batch_worker.usage.connect(self._record_usage)
         self.batch_worker.row_status.connect(self._batch_row_status)
         self.batch_worker.progress.connect(self._batch_progress)
         self.batch_worker.finished_summary.connect(self._batch_done)
@@ -2125,7 +2590,10 @@ class MainWindow(QMainWindow):
         for r in self.responsive:
             r.update_for(avail)
         room = self.chip_box.width() - 10
-        for c in (self.chip_ffmpeg, self.chip_minimax, self.chip_inworld, self.chip_voices):
+        for c in (self.chip_usage, self.chip_ffmpeg, self.chip_minimax, self.chip_inworld, self.chip_voices):
+            if c is self.chip_usage and not getattr(self, "_usage_chip_on", False):
+                c.hide()
+                continue
             need = c.sizeHint().width() + 8
             c.setVisible(room >= need)
             if room >= need:

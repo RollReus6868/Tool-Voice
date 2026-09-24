@@ -129,3 +129,37 @@ def fmt_duration(seconds: float | None) -> str:
 
 def copy_file(src: str, dst: str) -> None:
     shutil.copyfile(src, dst)
+
+
+def parse_row_selection(text: str, total: int) -> list[int]:
+    """'1-10, 15, 20-' -> sorted unique 1-based numbers within 1..total.
+    Empty text = all rows. 'a-' runs to the last row. Raises ValueError with a
+    Vietnamese message for anything it cannot read or that is out of range."""
+    raw = (text or "").strip()
+    if not raw:
+        return list(range(1, total + 1))
+    norm = raw.replace("–", "-").replace("—", "-").replace("đến", "-").replace("..", "-")
+    for sep in (";", "\n", "\t", " "):
+        norm = norm.replace(sep, ",")
+    picked: set[int] = set()
+    for tok in (t.strip() for t in norm.split(",")):
+        if not tok:
+            continue
+        if "-" in tok:
+            a, _, b = tok.partition("-")
+            a, b = a.strip(), b.strip()
+            if not a.isdigit() or (b and not b.isdigit()):
+                raise ValueError(f"Không hiểu “{tok}”. Ví dụ đúng: 1-10, 15, 20-25")
+            lo, hi = int(a), (int(b) if b else total)
+            if lo > hi:
+                lo, hi = hi, lo
+        elif tok.isdigit():
+            lo = hi = int(tok)
+        else:
+            raise ValueError(f"Không hiểu “{tok}”. Ví dụ đúng: 1-10, 15, 20-25")
+        if lo < 1 or hi > total:
+            raise ValueError(f"“{tok}” vượt ngoài 1–{total} (file có {total} dòng nội dung).")
+        picked.update(range(lo, hi + 1))
+    if not picked:
+        raise ValueError("Chưa chọn dòng nào.")
+    return sorted(picked)

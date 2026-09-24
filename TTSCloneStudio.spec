@@ -26,7 +26,7 @@ datas += collect_data_files("certifi")
 
 hiddenimports = collect_submodules("keyring.backends") + [
     "main", "dialogs", "widgets", "theme", "media", "providers", "storage", "utils", "workers",
-    "updater", "app_info", "selfcheck",
+    "updater", "app_info", "selfcheck", "usage",
 ]
 if IS_WIN:
     hiddenimports += ["win32ctypes.core", "win32ctypes.pywin32.win32cred"]

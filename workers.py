@@ -48,9 +48,10 @@ class FuncWorker(QThread):
 def produce_outputs(
     *, provider, text: str, voice: dict, model: str, speed: float, out_dir: str, name: str,
     fmt: str, video: dict, log, cancelled, progress=None, keep_mp3_dir: str | None = None,
+    options: dict | None = None,
 ) -> dict:
     """Synthesize one text and write MP3 / MP4 according to fmt (mp3|mp4|both).
-    Returns {"mp3": path|None, "mp4": path|None, "audio": path_of_mp3_used}."""
+    Returns {"mp3": path|None, "mp4": path|None, "audio": path_of_mp3_used, "chars": billed_chars}."""
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     want_mp3 = fmt in ("mp3", "both")
     want_mp4 = fmt in ("mp4", "both")
@@ -67,11 +68,17 @@ def produce_outputs(
     try:
         if progress:
             progress(5)
-        provider.synthesize(text, voice["provider_voice_id"], audio_path, model=model, speed=speed,
-                            language=voice.get("language", ""))
+        try:
+            provider.synthesize(text, voice["provider_voice_id"], audio_path, model=model, speed=speed,
+                                language=voice.get("language", ""), options=options)
+        except BaseException as exc:
+            # chunks already synthesized were billed even if a later one failed
+            exc.chars_billed = getattr(provider, "chars_used", 0)
+            raise
         if progress:
             progress(60 if want_mp4 else 100)
-        result = {"mp3": final_mp3 if want_mp3 else None, "mp4": None, "audio": audio_path}
+        result = {"mp3": final_mp3 if want_mp3 else None, "mp4": None, "audio": audio_path,
+                  "chars": int(getattr(provider, "chars_used", 0) or 0)}
         if want_mp4:
             if cancelled():
                 raise CancelledError("Đã dừng theo yêu cầu.")
@@ -92,10 +99,11 @@ class BatchWorker(QThread):
     log = pyqtSignal(str)
     row_status = pyqtSignal(int, str, str)   # task index, state, detail
     progress = pyqtSignal(int, int)          # done, total
+    usage = pyqtSignal(str, str, int)        # provider, model, billed characters
     finished_summary = pyqtSignal(dict)
 
     def __init__(self, *, tasks, voice, model, speed, out_dir, fmt, video, threads, skip_existing,
-                 merge_all, merge_name, secrets, config, parent=None):
+                 merge_all, merge_name, secrets, config, options=None, parent=None):
         super().__init__(parent)
         self.tasks = tasks
         self.voice = voice
@@ -110,6 +118,7 @@ class BatchWorker(QThread):
         self.merge_name = merge_name
         self.secrets = secrets
         self.config = config
+        self.options = options or {}
         self._cancel = threading.Event()
 
     def cancel(self):
@@ -141,8 +150,10 @@ class BatchWorker(QThread):
             res = produce_outputs(
                 provider=provider, text=task["text"], voice=self.voice, model=self.model, speed=self.speed,
                 out_dir=self.out_dir, name=name, fmt=self.fmt, video=self.video, log=self.log.emit,
-                cancelled=self._cancel.is_set, keep_mp3_dir=keep_dir,
+                cancelled=self._cancel.is_set, keep_mp3_dir=keep_dir, options=self.options,
             )
+            if res.get("chars"):
+                self.usage.emit(self.voice["provider"], self.model, int(res["chars"]))
             dur = probe_duration(res["audio"])
             detail = " + ".join(Path(p).name for p in (res["mp3"], res["mp4"]) if p)
             if dur:
@@ -150,16 +161,23 @@ class BatchWorker(QThread):
             self.row_status.emit(idx, "ok", detail)
             self.log.emit(f"✅ Dòng {task['row_no']} → {detail}")
             return "ok", res["audio"]
-        except CancelledError:
+        except CancelledError as exc:
+            self._emit_partial(exc)
             self.row_status.emit(idx, "stopped", "Đã dừng")
             return "stopped", None
         except Exception as exc:  # noqa: BLE001
+            self._emit_partial(exc)
             if self._cancel.is_set():
                 self.row_status.emit(idx, "stopped", "Đã dừng")
                 return "stopped", None
             self.row_status.emit(idx, "error", str(exc))
             self.log.emit(f"❌ Dòng {task['row_no']} lỗi: {exc}")
             return "error", None
+
+    def _emit_partial(self, exc):
+        n = int(getattr(exc, "chars_billed", 0) or 0)
+        if n:
+            self.usage.emit(self.voice["provider"], self.model, n)
 
     def run(self):
         total = len(self.tasks)

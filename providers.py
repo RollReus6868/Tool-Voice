@@ -20,12 +20,19 @@ CancelFn = Callable[[], bool] | None
 PROVIDERS = ["Inworld", "MiniMax"]
 
 MODELS = {
-    "Inworld": ["inworld-tts-2", "inworld-tts-2-flash", "inworld-tts-1.5-max", "inworld-tts-1.5-mini"],
+    # first entry = default (fast and cheapest per character)
+    "Inworld": ["inworld-tts-2-flash", "inworld-tts-2", "inworld-tts-1.5-max", "inworld-tts-1.5-mini"],
     "MiniMax": ["speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo",
                 "speech-02-hd", "speech-02-turbo"],
 }
 
 SPEED_RANGE = {"Inworld": (0.5, 1.5), "MiniMax": (0.5, 2.0)}
+
+# Inworld "Delivery" (the Playground slider). inworld-tts-2 reads deliveryMode;
+# older/flash models read temperature instead (each model ignores the other field).
+DELIVERY = [("STABLE", "🧊 Ổn định", 0.7), ("BALANCED", "⚖ Cân bằng", 1.0), ("CREATIVE", "🎨 Sáng tạo", 1.3)]
+DELIVERY_TEMPERATURE = {code: temp for code, _label, temp in DELIVERY}
+INSTRUCTION_MODELS = {"inworld-tts-2"}   # models that accept a speaking-style instruction
 
 LANGUAGES = {
     # label, API value (Inworld = BCP-47 / empty = auto; MiniMax = language_boost)
@@ -100,6 +107,7 @@ class BaseProvider:
         self.log = log or (lambda _msg: None)
         self.cancel = cancel or (lambda: False)
         self.session = requests.Session()
+        self.chars_used = 0          # characters billed by the provider (reported or counted)
 
     def _check_cancel(self):
         if self.cancel():
@@ -158,14 +166,15 @@ class BaseProvider:
                     denoise: bool = False) -> str:
         raise NotImplementedError
 
-    def synth_chunk(self, text: str, voice_id: str, *, model: str, speed: float, language: str) -> bytes:
+    def synth_chunk(self, text: str, voice_id: str, *, model: str, speed: float, language: str,
+                    options: dict | None = None) -> bytes:
         raise NotImplementedError
 
     def list_voices(self) -> list[dict]:
         raise NotImplementedError
 
     def synthesize(self, text: str, voice_id: str, output_path: str, *, model: str,
-                   speed: float = 1.0, language: str = "") -> str:
+                   speed: float = 1.0, language: str = "", options: dict | None = None) -> str:
         chunks = split_text(text, self.max_chars)
         if not chunks:
             raise ProviderError("Nội dung văn bản trống.")
@@ -175,7 +184,8 @@ class BaseProvider:
                 self._check_cancel()
                 if len(chunks) > 1:
                     self.log(f"   ↳ {self.name}: đoạn {index}/{len(chunks)} ({len(chunk)} ký tự)")
-                audio = self.synth_chunk(chunk, voice_id, model=model, speed=speed, language=language)
+                audio = self.synth_chunk(chunk, voice_id, model=model, speed=speed, language=language,
+                                         options=options)
                 if not audio:
                     raise ProviderError("API trả về audio rỗng.")
                 part = Path(td) / f"part_{index:04d}.mp3"
@@ -223,13 +233,34 @@ class InworldProvider(BaseProvider):
             raise ProviderError(f"Inworld không trả voiceId: {str(data)[:300]}")
         return voice_id
 
-    def synth_chunk(self, text, voice_id, *, model, speed, language) -> bytes:
+    OPTION_FIELDS = ("deliveryMode", "temperature", "enhanceGeneration", "instruction")
+
+    @staticmethod
+    def apply_options(payload: dict, model: str, options: dict | None) -> dict:
+        """Delivery / quality / instruction, sent only when they differ from the API defaults."""
+        o = options or {}
+        delivery = (o.get("delivery") or "BALANCED").upper()
+        if delivery in DELIVERY_TEMPERATURE and delivery != "BALANCED":
+            if model == "inworld-tts-2":
+                payload["deliveryMode"] = delivery
+            else:
+                payload["temperature"] = DELIVERY_TEMPERATURE[delivery]
+        if o.get("enhance"):
+            payload["enhanceGeneration"] = True
+        instruction = (o.get("instruction") or "").strip()
+        if instruction and model in INSTRUCTION_MODELS:
+            payload["instruction"] = instruction[:500]
+        return payload
+
+    def synth_chunk(self, text, voice_id, *, model, speed, language, options=None) -> bytes:
+        model = model or MODELS["Inworld"][0]
         payload: dict = {
             "text": text,
             "voiceId": voice_id,
-            "modelId": model or MODELS["Inworld"][0],
+            "modelId": model,
             "audioConfig": {"audioEncoding": "MP3", "sampleRateHertz": 44100},
         }
+        self.apply_options(payload, model, options)
         lo, hi = SPEED_RANGE["Inworld"]
         speed = max(lo, min(hi, float(speed or 1.0)))
         if abs(speed - 1.0) > 1e-3:
@@ -237,25 +268,55 @@ class InworldProvider(BaseProvider):
         lang = normalize_language("Inworld", language)
         if lang:
             payload["language"] = lang
-        data = self._request("POST", f"{self.base_url}/tts/v1/voice",
-                             headers=self.headers, json=payload, timeout=180)
+        extras = [k for k in self.OPTION_FIELDS if k in payload]
+        try:
+            data = self._request("POST", f"{self.base_url}/tts/v1/voice",
+                                 headers=self.headers, json=payload, timeout=180)
+        except ProviderError as exc:
+            # A model that does not accept one of the style options answers 400:
+            # read the text plainly instead of failing the whole job.
+            if not extras or not str(exc).startswith("HTTP 400"):
+                raise
+            for k in extras:
+                payload.pop(k, None)
+            self.log(f"⚠ {model} không nhận tùy chọn {', '.join(extras)} — đọc lại với thiết lập mặc định.")
+            data = self._request("POST", f"{self.base_url}/tts/v1/voice",
+                                 headers=self.headers, json=payload, timeout=180)
         audio = data.get("audioContent") or (data.get("result") or {}).get("audioContent")
         if not audio:
             raise ProviderError(f"Inworld không trả audioContent: {str(data)[:300]}")
+        used = (data.get("usage") or {}).get("processedCharactersCount")
+        self.chars_used += int(used) if isinstance(used, (int, float)) and used > 0 else len(text)
         return base64.b64decode(audio)
 
     def list_voices(self) -> list[dict]:
-        data = self._request("GET", f"{self.base_url}/voices/v1/voices",
-                             headers=self.headers, params={"pageSize": 2000}, timeout=60, retries=2)
-        out = []
-        for v in data.get("voices") or []:
-            src = (v.get("source") or "").upper()
-            out.append({
-                "voice_id": v.get("voiceId", ""),
-                "name": v.get("displayName") or v.get("voiceId", ""),
-                "kind": "Hệ thống" if src == "SYSTEM" else "Của tôi",
-                "language": v.get("languageCode") or _LEGACY_INWORLD.get(v.get("langCode", ""), v.get("langCode", "")),
-            })
+        out: list[dict] = []
+        token = ""
+        for _page in range(20):  # safety bound: 20 pages x 2000 voices
+            params = {"pageSize": 2000}
+            if token:
+                params["pageToken"] = token
+            data = self._request("GET", f"{self.base_url}/voices/v1/voices",
+                                 headers=self.headers, params=params, timeout=60, retries=2)
+            for v in data.get("voices") or []:
+                src = (v.get("source") or "").upper()
+                mine = bool(v.get("owned")) or src in ("IVC", "PVC", "TVD")
+                tags = [str(t) for t in (v.get("tags") or []) if t]
+                out.append({
+                    "voice_id": v.get("voiceId", ""),
+                    "name": v.get("displayName") or v.get("voiceId", ""),
+                    "kind": "Của tôi" if mine or (src and src != "SYSTEM") else "Hệ thống",
+                    "language": v.get("languageCode")
+                    or _LEGACY_INWORLD.get(v.get("langCode", ""), v.get("langCode", "")),
+                    "gender": {"male": "Nam", "female": "Nữ", "neutral": "Trung tính"}.get(
+                        (v.get("gender") or "").lower(), ""),
+                    "description": (v.get("description") or "").strip(),
+                    "tags": tags,
+                    "source": src,
+                })
+            token = data.get("nextPageToken") or ""
+            if not token:
+                break
         return out
 
 
@@ -331,7 +392,7 @@ class MiniMaxProvider(BaseProvider):
                       params=self._params(), json=payload, timeout=300, retries=2)
         return voice_id
 
-    def synth_chunk(self, text, voice_id, *, model, speed, language) -> bytes:
+    def synth_chunk(self, text, voice_id, *, model, speed, language, options=None) -> bytes:
         lo, hi = SPEED_RANGE["MiniMax"]
         payload = {
             "model": model or MODELS["MiniMax"][0],
@@ -349,6 +410,8 @@ class MiniMaxProvider(BaseProvider):
         audio = (data.get("data") or {}).get("audio")
         if not audio:
             raise ProviderError(f"MiniMax không trả audio: {str(data)[:300]}")
+        used = (data.get("extra_info") or {}).get("usage_characters")
+        self.chars_used += int(used) if isinstance(used, (int, float)) and used > 0 else len(text)
         if isinstance(audio, str) and audio.startswith(("http://", "https://")):
             return self._request("GET", audio, timeout=180, json_body=False).content
         try:
@@ -368,7 +431,11 @@ class MiniMaxProvider(BaseProvider):
                     "voice_id": v.get("voice_id", ""),
                     "name": v.get("voice_name") or v.get("voice_id", ""),
                     "kind": kind,
-                    "language": (desc[0] if isinstance(desc, list) and desc else "")[:40],
+                    "language": "",
+                    "gender": "",
+                    "description": " ".join(desc) if isinstance(desc, list) else str(desc or ""),
+                    "tags": [],
+                    "source": key,
                 })
         return out
 
