@@ -399,6 +399,17 @@ assert w.ov_fields["num_step"].value() == 32 and w.ov_fields["denoise"].isChecke
 w.tts_voice.setCurrentIndex(w.tts_voice.findData("u2")); pump()
 w.tts_format.buttons["mp3"].click()
 PAGES = ["clone", "tts", "batch", "video", "omni", "settings", "usage", "update", "guide"]
+overflow = []
+def widest(root, n=6):
+    """The widgets that force a page wider than the window: biggest minimum widths first."""
+    from PyQt6.QtWidgets import QWidget
+    rows = []
+    for c in root.findChildren(QWidget):
+        if c.isVisibleTo(root):
+            mw = max(c.minimumSizeHint().width(), c.minimumWidth())
+            text = getattr(c, "text", lambda: "")() if hasattr(c, "text") else ""
+            rows.append((mw, f"{type(c).__name__}[{c.objectName() or str(text)[:28]}]={mw}"))
+    return ", ".join(t for _mw, t in sorted(rows, reverse=True)[:n])
 assert w.ui_style.value() == "classic" and not w.ui_theme.isEnabled()
 for style in ("classic", "youwee"):
     w.ui_style.set_value(style, emit=True); pump()
@@ -409,8 +420,15 @@ for style in ("classic", "youwee"):
             w.go(i)
             if n == "video": w._update_video_preview()
             sa = w.stack.widget(i).findChild(main.QScrollArea)
-            assert sa.horizontalScrollBar().maximum() == 0, (style, mode, n, sa.horizontalScrollBar().maximum())
+            if sa.horizontalScrollBar().maximum():
+                overflow.append(f"{style}/{mode}/{n}: +{sa.horizontalScrollBar().maximum()}px, viewport "
+                                f"{sa.viewport().width()} | widest: {widest(sa.widget())}")
             shot(f"{style}_{mode}_{i}_{n}")
+if overflow:      # a page that needs a horizontal scrollbar at this window size is a layout bug
+    from PyQt6.QtGui import QFontInfo
+    fi = QFontInfo(app.font())
+    raise AssertionError(" || ".join(overflow[:3]) + f" || {len(overflow)} page(s) wider than the {W}x{H} window; "
+                         f"font {fi.family()} {fi.pixelSize()}px, {w.logicalDpiX()} dpi, stack {w.stack.width()}px")
 assert w.ui_theme.isEnabled() and "Nunito" in app.styleSheet()
 w.ui_theme.set_value("sunset", emit=True); pump()
 assert storage.ConfigStore().load()["ui_theme"] == "sunset" and main.youwee_colors("light", "sunset")["primary"] in app.styleSheet()
