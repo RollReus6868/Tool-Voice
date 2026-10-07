@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 import shutil
-from datetime import datetime
 from pathlib import Path
 
 from media import probe_duration
@@ -18,32 +17,19 @@ def safe_filename(value: str, default: str = "audio") -> str:
     return value[:120] or default
 
 
-def slug_voice_id(name: str) -> str:
-    """MiniMax voice_id: 8-256 chars, starts with a letter, [A-Za-z0-9_-],
-    must not end with - or _, must be unique."""
-    import unicodedata
-
-    ascii_name = unicodedata.normalize("NFKD", name.replace("đ", "d").replace("Đ", "D"))
-    ascii_name = ascii_name.encode("ascii", "ignore").decode("ascii")
-    base = re.sub(r"[^A-Za-z0-9_-]+", "_", ascii_name.strip()).strip("_-")
-    if not base or not base[0].isalpha():
-        base = "Voice_" + base
-    stamp = datetime.now().strftime("%y%m%d%H%M%S")
-    result = f"{base[:200]}_{stamp}"
-    return result.rstrip("_-")
-
-
 SAMPLE_RULES = {
-    # provider: (extensions, max_bytes, min_sec, max_sec, note)
-    "inworld": ({".wav", ".mp3"}, 15 * 1024 * 1024, 5.0, 30.0,
+    # provider: (extensions, max_bytes, min_sec, max_sec, long_warning, note)
+    # longer than max_sec is refused unless long_warning says what happens instead
+    "inworld": ({".wav", ".mp3"}, 15 * 1024 * 1024, 5.0, 30.0, "Inworld chỉ dùng 30 giây đầu.",
                 "Inworld: WAV/MP3, tốt nhất 10–30 giây (quá 30 giây sẽ bị cắt bớt)."),
-    "minimax": ({".wav", ".mp3", ".m4a"}, 20 * 1024 * 1024, 10.0, 300.0,
-                "MiniMax: WAV/MP3/M4A, 10 giây – 5 phút, tối đa 20 MB."),
+    "omnivoice": ({".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm"}, 100 * 1024 * 1024, 2.0, 15.0,
+                  "mẫu dài làm chậm và giảm chất lượng clone, nên cắt còn 3–10 giây.",
+                  "OmniVoice: WAV/MP3/M4A/FLAC/OGG, tốt nhất 3–10 giây, 1 người nói, cùng ngôn ngữ với văn bản sẽ đọc."),
 }
 
 
 def sample_hint(provider: str) -> str:
-    return SAMPLE_RULES[provider.lower()][4]
+    return SAMPLE_RULES[provider.lower()][5]
 
 
 def validate_voice_sample(path: str, provider: str) -> tuple[bool, str]:
@@ -54,7 +40,7 @@ def validate_voice_sample(path: str, provider: str) -> tuple[bool, str]:
     if not p.is_file():
         return False, "Không tìm thấy file giọng mẫu."
 
-    allowed, max_bytes, min_sec, max_sec, _ = SAMPLE_RULES[provider.lower()]
+    allowed, max_bytes, min_sec, max_sec, long_warning, _ = SAMPLE_RULES[provider.lower()]
     ext = p.suffix.lower()
     size = p.stat().st_size
 
@@ -66,12 +52,12 @@ def validate_voice_sample(path: str, provider: str) -> tuple[bool, str]:
 
     duration = probe_duration(str(p))
     if duration is None:
-        return True, "⚠ Không đọc được độ dài file; API sẽ tự kiểm tra."
+        return True, "⚠ Không đọc được độ dài file; sẽ kiểm tra khi clone."
     if duration < min_sec:
         return False, f"Mẫu quá ngắn: {duration:.1f}s (cần tối thiểu {min_sec:g}s)."
     if duration > max_sec:
-        if provider.lower() == "inworld":
-            return True, f"⚠ Mẫu dài {duration:.1f}s — Inworld chỉ dùng 30 giây đầu."
+        if long_warning:
+            return True, f"⚠ Mẫu dài {duration:.1f}s — {long_warning}"
         return False, f"Mẫu quá dài: {duration:.1f}s (tối đa {max_sec:g}s)."
     return True, f"✔ Mẫu hợp lệ: {duration:.1f} giây • {size / 1024 / 1024:.2f} MB"
 

@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import providers  # noqa: E402
 import usage  # noqa: E402
-from providers import MODELS, InworldProvider, MiniMaxProvider  # noqa: E402
+from providers import MODELS, InworldProvider  # noqa: E402
 from storage import migrate  # noqa: E402
 from utils import parse_row_selection  # noqa: E402
 
@@ -112,13 +112,6 @@ class InworldOptionsTests(unittest.TestCase):
         self.assertEqual([v["kind"] for v in voices], ["Hệ thống", "Của tôi"])
         self.assertEqual(voices[0]["gender"], "Nữ")
         self.assertEqual(p.session.calls[1][2]["params"]["pageToken"], "t2")
-
-    def test_minimax_ignores_options(self):
-        p = MiniMaxProvider("k")
-        p.session = FakeSession([Resp({"base_resp": {"status_code": 0}, "data": {"audio": "4944"},
-                                       "extra_info": {"usage_characters": 3}})])
-        p.synth_chunk("abc", "v", model="speech-2.8-hd", speed=1, language="auto", options={"delivery": "CREATIVE"})
-        self.assertEqual(p.chars_used, 3)
 
 
 class UsageTests(unittest.TestCase):
@@ -273,8 +266,12 @@ class MigrationTests(unittest.TestCase):
     def test_switches_old_default_once(self):
         ch = migrate({"model_Inworld": "inworld-tts-2", "defaults_rev": 0})
         self.assertEqual(ch["model_Inworld"], "inworld-tts-2-flash")
-        self.assertEqual(ch["defaults_rev"], 2)
-        self.assertEqual(migrate({"model_Inworld": "inworld-tts-2", "defaults_rev": 2}), {})
+        self.assertEqual(ch["defaults_rev"], 3)
+        self.assertEqual(migrate({"model_Inworld": "inworld-tts-2", "defaults_rev": 3}), {})
+
+    def test_30_moves_off_minimax_and_keeps_the_model_choice(self):
+        ch = migrate({"model_Inworld": "inworld-tts-2", "defaults_rev": 2, "last_provider": "MiniMax"})
+        self.assertEqual(ch, {"last_provider": "Inworld", "defaults_rev": 3})
 
 
 if __name__ == "__main__":

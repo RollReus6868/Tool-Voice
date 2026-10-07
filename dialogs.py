@@ -8,13 +8,15 @@ from PyQt6.QtWidgets import (
 )
 
 import usage
-from providers import LANGUAGES, PROVIDERS, build_provider
+from providers import LANGUAGES, build_provider
 from widgets import button, label
 from workers import FuncWorker
 
 
 class AddVoiceDialog(QDialog):
-    """Add an existing provider voice ID (made elsewhere) to the local library."""
+    """Add an existing Inworld voice ID (made elsewhere) to the local library."""
+
+    PROVIDER = "Inworld"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -24,22 +26,20 @@ class AddVoiceDialog(QDialog):
         lay.setContentsMargins(22, 20, 22, 18)
         lay.setSpacing(12)
         lay.addWidget(label("➕  Thêm Voice ID có sẵn", role="cardTitle", accent="blue"))
-        lay.addWidget(label("Dùng khi bạn đã có Voice ID trên tài khoản Inworld/MiniMax "
-                            "(tạo trên web hoặc máy khác).", role="hint", wrap=True))
+        lay.addWidget(label("Dùng khi bạn đã có Voice ID trên tài khoản Inworld (tạo trên web hoặc máy khác). "
+                            "Giọng OmniVoice nằm trên máy nên tạo ở trang Clone giọng / OmniVoice.", role="hint", wrap=True))
         g = QGridLayout()
         g.setHorizontalSpacing(12)
         g.setVerticalSpacing(10)
-        self.provider = QComboBox()
-        self.provider.addItems(PROVIDERS)
         self.voice_id = QLineEdit()
         self.voice_id.setPlaceholderText("Dán Voice ID vào đây")
         self.name = QLineEdit()
         self.name.setPlaceholderText("Tên dễ nhớ, ví dụ: Giọng nam trầm")
         self.language = QComboBox()
-        self.provider.currentTextChanged.connect(self._fill_lang)
-        self._fill_lang(self.provider.currentText())
-        for r, (t, w) in enumerate([("Nhà cung cấp", self.provider), ("Voice ID", self.voice_id),
-                                    ("Tên hiển thị", self.name), ("Ngôn ngữ", self.language)]):
+        for lbl, code in LANGUAGES[self.PROVIDER]:
+            self.language.addItem(lbl, code)
+        for r, (t, w) in enumerate([("Voice ID", self.voice_id), ("Tên hiển thị", self.name),
+                                    ("Ngôn ngữ", self.language)]):
             g.addWidget(label(t, role="field"), r, 0)
             g.addWidget(w, r, 1)
         lay.addLayout(g)
@@ -52,11 +52,6 @@ class AddVoiceDialog(QDialog):
         row.addWidget(button("✔  Thêm vào thư viện", variant="blue", slot=self._ok))
         lay.addLayout(row)
 
-    def _fill_lang(self, provider):
-        self.language.clear()
-        for lbl, code in LANGUAGES[provider]:
-            self.language.addItem(lbl, code)
-
     def _ok(self):
         if not self.voice_id.text().strip():
             self.err.setText("Hãy nhập Voice ID.")
@@ -66,7 +61,7 @@ class AddVoiceDialog(QDialog):
     def result_voice(self) -> dict:
         vid = self.voice_id.text().strip()
         return {
-            "provider": self.provider.currentText(),
+            "provider": self.PROVIDER,
             "provider_voice_id": vid,
             "local_name": self.name.text().strip() or vid,
             "language": self.language.currentData() or "",

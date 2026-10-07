@@ -42,7 +42,8 @@ for f in list(ROOT.glob("*.sh")) + list(ROOT.glob("*.command")):
 # 3. required files
 for rel in ("RELEASE_NOTES.md", "TTSCloneStudio.spec", "installer/TTSCloneStudio.iss", "assets/app.ico",
             "assets/app.icns", "assets/app.png", ".gitattributes", "requirements.txt", "requirements-build.txt",
-            ".github/workflows/build.yml"):
+            ".github/workflows/build.yml", "engine/omni_server.py", "assets/omni_langs.tsv",
+            "assets/fonts/Nunito_400Regular.ttf", "assets/fonts/OFL.txt"):
     if not (ROOT / rel).is_file():
         err(f"missing {rel}")
 
@@ -68,6 +69,10 @@ spec = (ROOT / "TTSCloneStudio.spec").read_text(encoding="utf-8")
 for mod in sorted(p.stem for p in ROOT.glob("*.py") if p.stem not in ("launcher", "self_test")):
     if f'"{mod}"' not in spec:
         err(f"{mod}.py is not in the spec hiddenimports")
+
+for rel in ("engine/omni_server.py", "assets/omni_langs.tsv", "assets/fonts"):
+    if f'"{rel}"' not in spec:
+        err(f"{rel} is not in the spec datas (the packaged app would miss it)")
 
 # 6. release notes mention this version
 notes = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")

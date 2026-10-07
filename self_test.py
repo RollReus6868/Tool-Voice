@@ -9,8 +9,8 @@ from pathlib import Path
 
 import providers
 from media import find_ffmpeg, make_video, merge_audio_files, probe_duration
-from providers import InworldProvider, MiniMaxProvider, ProviderError
-from utils import safe_filename, slug_voice_id, split_text, validate_voice_sample
+from providers import InworldProvider, ProviderError
+from utils import safe_filename, split_text, validate_voice_sample
 
 
 class Resp:
@@ -57,42 +57,8 @@ def run():
         assert all(len(p) <= 1800 for p in parts) and "".join(parts).replace(" ", "") == long.replace(" ", "")
         ok += 1
 
-        # --- MiniMax clone + TTS (hex), with one rate-limit retry
-        mm = MiniMaxProvider("key")
-        mm.session = FakeSession([
-            Resp({"file": {"file_id": 123}, "base_resp": {"status_code": 0}}),
-            Resp({"base_resp": {"status_code": 1002, "status_msg": "rate limit"}}),
-            Resp({"base_resp": {"status_code": 0}}),
-        ])
         sample = td / "s.wav"
         sample.write_bytes(b"RIFF0000")
-        vid = mm.clone_voice(str(sample), "Giọng Đức Anh", "Vietnamese")
-        assert vid.startswith("Giong_Duc_Anh_") and len(vid) >= 8, vid
-        body = mm.session.calls[-1][2]["json"]
-        assert body["language_boost"] == "Vietnamese" and body["file_id"] == 123
-        ok += 1
-
-        mm2 = MiniMaxProvider("key")
-        mm2.session = FakeSession([Resp({"data": {"audio": mp3.hex()}, "base_resp": {"status_code": 0}})] * 3)
-        out = td / "mm.mp3"
-        mm2.synthesize("Xin chào " * 1200, "Voice_1234", str(out), model="speech-2.8-hd", speed=1.3, language="Vietnamese")
-        assert len(mm2.session.calls) == 3  # 10.8k chars -> 3 chunks of <=5000
-        req = mm2.session.calls[0][2]["json"]
-        assert req["voice_setting"]["speed"] == 1.3 and req["language_boost"] == "Vietnamese"
-        d = probe_duration(str(out))
-        assert d and 2.5 < d < 3.6, d
-        ok += 1
-
-        # --- MiniMax auth error is NOT retried and is readable
-        mm3 = MiniMaxProvider("bad")
-        mm3.session = FakeSession([Resp({"base_resp": {"status_code": 1004, "status_msg": "auth failed"}})])
-        try:
-            mm3.synthesize("hi", "v", str(td / "x.mp3"), model="speech-2.8-hd")
-            raise AssertionError("should fail")
-        except ProviderError as e:
-            assert "1004" in str(e) and "API key" in str(e)
-        assert len(mm3.session.calls) == 1
-        ok += 1
 
         # --- Inworld clone + TTS, 503 retried, speed + language sent
         iw = InworldProvider("Basic abc")
@@ -123,10 +89,6 @@ def run():
                                                    {"voiceId": "b", "displayName": "B", "source": "SYSTEM"}]})])
         vs = iw.list_voices()
         assert vs[0]["kind"] == "Của tôi" and vs[0]["language"] == "vi-VN" and vs[1]["kind"] == "Hệ thống"
-        mm.session = FakeSession([Resp({"voice_cloning": [{"voice_id": "X_123456", "description": []}],
-                                        "system_voice": [{"voice_id": "S1", "voice_name": "Sys"}],
-                                        "base_resp": {"status_code": 0}})])
-        assert [v["kind"] for v in mm.list_voices()] == ["Của tôi", "Hệ thống"]
         ok += 1
 
         # --- merge + MP4 (real ffmpeg)
@@ -148,13 +110,19 @@ def run():
 
         # --- misc helpers
         assert safe_filename("1.0") == "1" and safe_filename('a/b:c*') == "a_b_c_"
-        assert slug_voice_id("123").startswith("Voice_")
         wav = td / "short.wav"
         subprocess.run([find_ffmpeg(), "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=3", str(wav)], check=True)
         assert not validate_voice_sample(str(wav), "Inworld")[0]
         wav12 = td / "ok.wav"
         subprocess.run([find_ffmpeg(), "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=12", str(wav12)], check=True)
-        assert validate_voice_sample(str(wav12), "Inworld")[0] and validate_voice_sample(str(wav12), "MiniMax")[0]
+        assert validate_voice_sample(str(wav12), "Inworld")[0]
+        ok3, msg3 = validate_voice_sample(str(wav), "OmniVoice")           # 3 s: the ideal OmniVoice sample
+        ok12, msg12 = validate_voice_sample(str(wav12), "OmniVoice")       # 12 s: fine
+        assert ok3 and msg3.startswith("✔") and ok12 and msg12.startswith("✔"), (msg3, msg12)
+        wav20 = td / "long.wav"
+        subprocess.run([find_ffmpeg(), "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=20", str(wav20)], check=True)
+        okl, msgl = validate_voice_sample(str(wav20), "OmniVoice")         # long: allowed, with a warning
+        assert okl and msgl.startswith("⚠"), msgl
         ok += 1
 
     print(f"Self-test passed: {ok} groups OK.")

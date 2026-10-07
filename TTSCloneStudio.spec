@@ -18,7 +18,10 @@ if MODE not in ("onedir", "onefile"):
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform.startswith("win")
 
-datas = [("assets/app.png", "assets"), ("assets/app.ico", "assets")]
+datas = [("assets/app.png", "assets"), ("assets/app.ico", "assets"),
+         ("assets/omni_langs.tsv", "assets"),          # OmniVoice language list
+         ("assets/fonts", "assets/fonts"),             # Nunito (Youwee style)
+         ("engine/omni_server.py", "engine")]          # run by the OmniVoice environment's own Python
 # imageio-ffmpeg ships the ffmpeg executable as package data -> collect it explicitly
 datas += collect_data_files("imageio_ffmpeg", include_py_files=False)
 # requests needs certifi's CA bundle for HTTPS
@@ -26,7 +29,7 @@ datas += collect_data_files("certifi")
 
 hiddenimports = collect_submodules("keyring.backends") + [
     "main", "dialogs", "widgets", "theme", "media", "providers", "storage", "utils", "workers",
-    "updater", "app_info", "selfcheck", "usage",
+    "updater", "app_info", "selfcheck", "usage", "omni",
 ]
 if IS_WIN:
     hiddenimports += ["win32ctypes.core", "win32ctypes.pywin32.win32cred"]

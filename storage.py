@@ -59,8 +59,6 @@ def _save_json(path: Path, data: Any) -> None:
 DEFAULT_OUTPUT = str(Path.home() / "Documents" / "TTS_Output")
 
 DEFAULT_CONFIG = {
-    "minimax_base_url": "https://api.minimax.io",
-    "minimax_group_id": "",
     "inworld_base_url": "https://api.inworld.ai",
     "last_output_dir": DEFAULT_OUTPUT,
     "theme": "dark",
@@ -83,9 +81,14 @@ DEFAULT_CONFIG = {
     "batch_rows": "",                # row selection, e.g. "1-10, 15"
     "inworld_usage": None,           # see usage.py
     "defaults_rev": 0,
+    # 3.0
+    "ui_style": "classic",           # classic | youwee
+    "ui_theme": "ocean",             # Youwee colour theme, see theme.YOUWEE_THEMES
+    "ov_hardware": "auto",           # OmniVoice install: auto | cuda | cpu   (generation settings: ov_*, see omni.py)
 }
 
-DEFAULTS_REV = 2
+DEFAULTS_REV = 3
+REMOVED_PROVIDERS = ("MiniMax",)     # dropped in 3.0
 
 
 def migrate(data: dict) -> dict:
@@ -95,6 +98,10 @@ def migrate(data: dict) -> dict:
     if rev < 2:
         # 2.2: the default Inworld model became inworld-tts-2-flash
         changes["model_Inworld"] = "inworld-tts-2-flash"
+    if rev < 3:
+        # 3.0: MiniMax was removed
+        if data.get("last_provider") in REMOVED_PROVIDERS:
+            changes["last_provider"] = "Inworld"
     if rev < DEFAULTS_REV:
         changes["defaults_rev"] = DEFAULTS_REV
     return changes
@@ -148,6 +155,19 @@ class VoiceStore:
                 return voice
         return None
 
+    def drop_providers(self, providers) -> int:
+        """Remove every voice of providers the app no longer supports; the removed
+        entries are kept in voices_removed.json. Returns how many were removed."""
+        with _LOCK:
+            voices = self.list()
+            gone = [v for v in voices if v.get("provider") in providers]
+            if gone:
+                backup = VOICES_PATH.with_name("voices_removed.json")
+                old = _load_json(backup, [])
+                _save_json(backup, (old if isinstance(old, list) else []) + gone)
+                _save_json(VOICES_PATH, [v for v in voices if v.get("provider") not in providers])
+            return len(gone)
+
     def exists(self, provider: str, voice_id: str) -> bool:
         return any(v.get("provider") == provider and v.get("provider_voice_id") == voice_id
                    for v in self.list())
@@ -158,7 +178,7 @@ class SecretStore:
     via keyring. They are never written to config.json."""
 
     SERVICE = "TTSCloneStudio"
-    ENV = {"minimax_api_key": "MINIMAX_API_KEY", "inworld_api_key": "INWORLD_API_KEY"}
+    ENV = {"inworld_api_key": "INWORLD_API_KEY"}
 
     def __init__(self) -> None:
         self._memory: dict[str, str] = {}

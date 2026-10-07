@@ -1,7 +1,7 @@
 """Built-app self check, used by CI on every OS.
 
 Enabled with env TTS_SELFCHECK=<report.json>. The app opens normally, visits
-every page, runs ffmpeg for real (tone -> MP3 -> MP4), checks the keyring
+every page (both UI styles), runs ffmpeg for real (tone -> MP3 -> MP4), checks the keyring
 backend and the updater's view of how it was installed, writes a JSON report
 and quits with exit code 0 (report["ok"] tells pass/fail).
 Optional TTS_SELFCHECK_SHOT=<png> also saves a screenshot.
@@ -83,6 +83,22 @@ def run(window, app) -> None:
                 report["errors"].append("certifi bundle missing")
         except Exception as exc:  # noqa: BLE001
             report["errors"].append(f"certifi: {exc}")
+
+        # files the OmniVoice provider and the Youwee style need next to the code
+        import omni
+
+        missing = [rel for rel in ("engine/omni_server.py", "assets/omni_langs.tsv",
+                                   "assets/fonts/Nunito_400Regular.ttf") if not omni.resource(rel).is_file()]
+        report["omni_languages"] = len(omni.languages())
+        if missing or report["omni_languages"] < 600:
+            report["errors"].append(f"OmniVoice/Youwee resources missing: {missing or 'language list'}")
+        window.config["ui_style"] = "youwee"          # both looks render (nothing is saved)
+        for mode in ("light", "dark"):
+            window.apply_theme(mode)
+            app.processEvents()
+        window.config["ui_style"] = "classic"
+        window.apply_theme("dark")
+        app.processEvents()
 
         shot = os.environ.get("TTS_SELFCHECK_SHOT")
         if shot:

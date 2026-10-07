@@ -53,3 +53,12 @@ Name: "{autodesktop}\TTS Clone Studio"; Filename: "{app}\TTSCloneStudio.exe"; Ta
 
 [Run]
 Filename: "{app}\TTSCloneStudio.exe"; Description: "Launch TTS Clone Studio"; Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+; the OmniVoice engine (Python, PyTorch, models: several GB). Voices and settings are kept.
+Type: filesandordirs; Name: "{userappdata}\TTSCloneStudio\omni\env"
+Type: filesandordirs; Name: "{userappdata}\TTSCloneStudio\omni\python"
+Type: filesandordirs; Name: "{userappdata}\TTSCloneStudio\omni\models"
+Type: filesandordirs; Name: "{userappdata}\TTSCloneStudio\omni\tools"
+Type: filesandordirs; Name: "{userappdata}\TTSCloneStudio\omni\cache"
+Type: files; Name: "{userappdata}\TTSCloneStudio\omni\install.json"

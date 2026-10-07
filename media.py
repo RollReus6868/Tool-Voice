@@ -116,6 +116,25 @@ def merge_audio_files(parts: list[str], output_path: str) -> None:
                 shutil.copyfileobj(src, out)
 
 
+def _convert(src: str, dst: str, args: list[str], what: str) -> None:
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError("Không tìm thấy ffmpeg để chuyển đổi audio.")
+    Path(dst).parent.mkdir(parents=True, exist_ok=True)
+    proc = _run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(src), "-vn", *args, str(dst)])
+    if proc.returncode != 0 or not Path(dst).exists() or Path(dst).stat().st_size == 0:
+        raise RuntimeError(f"ffmpeg không {what}: " + (proc.stderr.strip()[-300:] or f"mã {proc.returncode}"))
+
+
+def to_wav(src: str, dst: str, rate: int = 24000) -> None:
+    """Any audio file -> mono 16-bit WAV (what the OmniVoice engine reads without extra codecs)."""
+    _convert(src, dst, ["-ac", "1", "-ar", str(rate), "-c:a", "pcm_s16le"], "đọc được file audio này")
+
+
+def wav_to_mp3(src: str, dst: str) -> None:
+    _convert(src, dst, ["-c:a", "libmp3lame", "-b:a", "160k"], "tạo được MP3")
+
+
 def _hex_to_ffmpeg_color(color: str) -> str:
     color = (color or "#000000").strip()
     if re.fullmatch(r"#[0-9a-fA-F]{6}", color):

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PyQt6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPen, QRadialGradient
 from PyQt6.QtWidgets import (
     QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QToolTip, QVBoxLayout, QWidget,
 )
@@ -44,6 +44,66 @@ def label(text: str = "", role: str | None = None, wrap: bool = False, **props) 
     if wrap:
         lb.setWordWrap(True)
     return lb
+
+
+class GlowBackground(QWidget):
+    """Window background. Youwee style: three soft glows in the theme's gradient colours
+    behind the floating panels; classic style: left to the stylesheet."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._bg: str | None = None
+        self._glows: list[str] = []
+
+    def set_glow(self, bg: str | None, colors: list[str] | None = None) -> None:
+        self._bg, self._glows = bg, list(colors or [])
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, bg is None)
+        self.update()
+
+    def paintEvent(self, e):
+        if self._bg is None:
+            return super().paintEvent(e)
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(self._bg))
+        w, h = self.width(), self.height()
+        spots = [(0.10 * w, -0.10 * h, 0.75 * w, 46), (0.92 * w, 0.08 * h, 0.60 * w, 38), (0.50 * w, 1.05 * h, 0.55 * w, 32)]
+        for color, (cx, cy, radius, alpha) in zip(self._glows, spots):
+            g = QRadialGradient(QPointF(cx, cy), radius)
+            c0 = QColor(color)
+            c0.setAlpha(alpha)
+            c1 = QColor(color)
+            c1.setAlpha(0)
+            g.setColorAt(0, c0)
+            g.setColorAt(1, c1)
+            p.fillRect(self.rect(), QBrush(g))
+        p.end()
+
+
+class GradientLabel(QLabel):
+    """A label whose text can be painted with a gradient (the app name in Youwee style)."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self._colors: list[str] = []
+
+    def set_gradient(self, colors: list[str] | None) -> None:
+        self._colors = list(colors or [])
+        self.update()
+
+    def paintEvent(self, e):
+        if len(self._colors) < 2:
+            return super().paintEvent(e)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        p.setFont(self.font())
+        r = self.contentsRect()
+        width = max(1, p.fontMetrics().horizontalAdvance(self.text()))
+        g = QLinearGradient(QPointF(r.left(), r.top()), QPointF(r.left() + width, r.bottom()))
+        for i, c in enumerate(self._colors):
+            g.setColorAt(i / (len(self._colors) - 1), QColor(c))
+        p.setPen(QPen(QBrush(g), 0))
+        p.drawText(r, int(self.alignment()), self.text())
+        p.end()
 
 
 class Card(QFrame):

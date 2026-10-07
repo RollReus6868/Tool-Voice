@@ -8,7 +8,8 @@ if SHOTS:
 W, H = (int(sys.argv[2]), int(sys.argv[3])) if len(sys.argv) > 3 else (1400, 900)
 tmp = Path(tempfile.mkdtemp()); os.environ["APPDATA"] = str(tmp / "appdata")
 os.environ["TTS_NO_UPDATE_CHECK"] = "1"
-os.environ["INWORLD_API_KEY"] = "fake"; os.environ["MINIMAX_API_KEY"] = "fake"
+os.environ["INWORLD_API_KEY"] = "fake"
+os.environ["TTS_OMNI_FAKE"] = "1"      # OmniVoice engine = engine/omni_server.py writing tones (no torch needed)
 sys.path.insert(0, str(APP))
 errors = []
 sys.excepthook = lambda t, e, tb: (errors.append("".join(traceback.format_exception(t, e, tb))), print("EXC:", "".join(traceback.format_exception(t, e, tb))[-1500:]))
@@ -45,8 +46,11 @@ class FakeProv:
             {"voice_id": "ws__toi", "name": "Giọng clone của tôi", "kind": "Của tôi", "language": "vi-VN",
              "gender": "", "description": "", "tags": [], "source": "IVC"},
         ]
-import dialogs
-workers.build_provider = main.build_provider = dialogs.build_provider = lambda *a, **k: FakeProv()
+import dialogs, omni, providers
+REAL_BUILD = providers.build_provider
+# Inworld is faked; OmniVoice goes through the real provider and the (fake-mode) engine process
+workers.build_provider = main.build_provider = dialogs.build_provider = (
+    lambda name, *a, **k: REAL_BUILD(name, *a, **k) if name == "OmniVoice" else FakeProv())
 # settings from 2.1: old default model, before the 2.2 migration; auto-sync tested explicitly below
 storage.ConfigStore().save({"model_Inworld": "inworld-tts-2", "defaults_rev": 0, "inworld_auto_sync": False})
 
@@ -62,6 +66,37 @@ def pump(n=5):
     for _ in range(n):
         app.processEvents(); time.sleep(0.02)
 pump()
+def wait_workers(limit=30):
+    t0 = time.time()
+    while any(x.isRunning() for x in list(w.workers)) and time.time() - t0 < limit: pump(2)
+    pump(4)
+w.open_path = lambda path: None
+
+# ================= 3.0: MiniMax removed, OmniVoice added
+assert w.stack.count() == 9 and len(main.NAV) == 9
+assert [v["uid"] for v in vs.list()] == ["u2", "u3"], vs.list()            # the MiniMax voice was dropped...
+assert (storage.APP_DIR / "voices_removed.json").exists()                   # ...and kept in a backup file
+assert storage.ConfigStore().load()["defaults_rev"] == 3
+assert "MiniMax" not in w.clone_provider.buttons and "OmniVoice" in w.clone_provider.buttons
+assert not hasattr(w, "mm_key") and "OmniVoice" in w.chip_omni.text()
+# clone a voice with OmniVoice (transcript left empty -> written by the engine)
+sample = tmp / "mau.mp3"
+subprocess.run([ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=duration=4", "-c:a", "libmp3lame", str(sample)], check=True)
+w.go(main.PAGE_CLONE); w.clone_provider.buttons["OmniVoice"].click(); pump()
+assert w.clone_language.currentData() == "vi" and w.clone_language.count() > 600
+assert not w.clone_ov_box.isHidden() and w.clone_denoise.isHidden()
+w.clone_sample.setText(str(sample)); assert w._validate_sample(), w.clone_sample_info.text()
+w.transcribe_sample(); wait_workers()
+assert w.clone_ref_text.toPlainText() == "lời thoại do máy chép", w.clone_ref_text.toPlainText()
+w.clone_ref_text.setPlainText(""); w.clone_name.setText("Giọng nam MC"); w.clone_instruct.setText("male, low pitch")
+w.clone_consent.setChecked(True)
+w.start_clone(); wait_workers()
+ov = [v for v in vs.list() if v["provider"] == "OmniVoice"]
+assert len(ov) == 1 and ov[0]["ref_text"] == "lời thoại do máy chép" and ov[0]["instruct"] == "male, low pitch", ov
+assert ov[0]["language"] == "vi" and ov[0]["ov_kind"] == "clone"
+assert omni.voice_prompt(ov[0]["provider_voice_id"]).is_file() and omni.voice_wav(ov[0]["provider_voice_id"]).is_file()
+OV = ov[0]["uid"]
+if SHOTS: w.grab().save(str(SHOTS / "clone_omnivoice.png"))
 
 # excel
 from openpyxl import Workbook
@@ -81,14 +116,13 @@ assert names == ["1", "2", "3", "4", "6", "1_2"], names
 # bindings
 w.tts_format.buttons["mp4"].click(); pump()
 assert w.batch_format.value() == "mp4" and storage.ConfigStore().load()["output_format"] == "mp4"
-w.tts_voice.setCurrentIndex(w.tts_voice.findData("u1")); pump()
-assert w.tts_model.itemText(0).startswith("speech") and w.tts_speed.maximum() == 2.0
+w.tts_voice.setCurrentIndex(w.tts_voice.findData(OV)); pump()
+assert w.tts_model.itemText(0) == "k2-fsa/OmniVoice" and w.tts_speed.maximum() == 1.5
+assert "miễn phí" in w.tts_voice_info.text() and "male, low pitch" in w.tts_voice_info.toolTip()
 w.tts_voice.setCurrentIndex(w.tts_voice.findData("u2")); pump()
 assert w.tts_model.itemText(0).startswith("inworld") and w.tts_speed.maximum() == 1.5
-w.clone_provider.buttons["MiniMax"].click(); pump()
-assert w.clone_language.currentData() == "Vietnamese"
 w.clone_provider.buttons["Inworld"].click(); pump()
-assert w.clone_language.currentData() == "vi-VN"
+assert w.clone_language.currentData() == "vi-VN" and w.clone_ov_box.isHidden() and not w.clone_denoise.isHidden()
 w.tts_text.setPlainText("Xin chào! " * 300); pump()
 assert "2.999" in w.tts_counter.text(), w.tts_counter.text()
 w._set_video_image(str(bg)); pump()
@@ -128,13 +162,7 @@ def shot(name, widget=None):
     if SHOTS:
         (widget or w).grab().save(str(SHOTS / f"{name}.png"))
 
-def wait_workers(limit=30):
-    t0 = time.time()
-    while any(x.isRunning() for x in list(w.workers)) and time.time() - t0 < limit: pump(2)
-    pump(4)
-
 # ================= 2.2 features
-w.open_path = lambda path: None
 # default model migrated to flash
 assert storage.ConfigStore().load()["model_Inworld"] == "inworld-tts-2-flash"
 w.tts_voice.setCurrentIndex(w.tts_voice.findData("u2")); pump()
@@ -145,9 +173,10 @@ assert not o["box"].isHidden()
 assert not o["instruction"].isEnabled()
 w.tts_model.setCurrentText("inworld-tts-2"); pump()
 assert o["instruction"].isEnabled()
-w.tts_voice.setCurrentIndex(w.tts_voice.findData("u1")); pump()
-assert o["box"].isHidden()
+w.tts_voice.setCurrentIndex(w.tts_voice.findData(OV)); pump()
+assert o["box"].isHidden() and not w.ov_boxes["tts"].isHidden()
 w.tts_voice.setCurrentIndex(w.tts_voice.findData("u2")); pump()
+assert w.ov_boxes["tts"].isHidden()
 w.tts_model.setCurrentText("inworld-tts-2-flash"); pump()
 
 # usage: budget + TTS run recorded
@@ -265,14 +294,127 @@ after = main.usage.summary(w._usage_data())["remaining"]
 assert abs((before - after) - 10.0) < 1e-6, (before, after)
 assert "%" in w.chip_usage.text(), w.chip_usage.text()
 
+# ================= 3.0: OmniVoice end to end (fake engine) =================
+w.go(main.PAGE_OMNI); pump()
+assert "Đã cài" in w.omni_status.text() and w.omni_load_btn.isEnabled(), w.omni_status.text()
+# generation settings are saved as soon as they change and travel with every request
+w.ov_fields["num_step"].setValue(16); w.ov_fields["denoise"].setChecked(False); w.ov_fields["normalize_text"].setChecked(True); pump()
+cfg = storage.ConfigStore().load()
+assert (cfg["ov_num_step"], cfg["ov_denoise"], cfg["ov_normalize_text"]) == (16, False, True), cfg
+REQS = []
+_real_request = omni.ENGINE.request
+def _spy(req, **kw):
+    REQS.append(dict(req)); return _real_request(req, **kw)
+omni.ENGINE.request = _spy
+# read text with the cloned OmniVoice voice: free, so the Inworld usage must not move
+w.go(main.PAGE_TTS); w.tts_voice.setCurrentIndex(w.tts_voice.findData(OV)); pump()
+assert "miễn phí" in w.tts_usage.text() and not w.tts_usage.isHidden(), w.tts_usage.text()
+tags = w.ov_boxes["tts"].findChild(main.QComboBox)
+w.tts_text.setPlainText(""); tags.setCurrentIndex(1); tags.activated.emit(1); pump()
+assert w.tts_text.toPlainText() == "[laughter] " and tags.currentIndex() == 0, w.tts_text.toPlainText()
+w.tts_text.setPlainText("[laughter] Xin chào từ OmniVoice. " * 24)       # 800+ chars -> 2 requests
+assert "2 đoạn" in w.tts_counter.text() and "💵" not in w.tts_counter.text(), w.tts_counter.text()
+w.tts_speed.setValue(1.2); w.tts_format.buttons["both"].click(); w.tts_filename.setText("omni_doc")
+u0 = main.usage.summary(storage.ConfigStore().load()["inworld_usage"])["chars"]
+w.start_tts(); wait_workers(60)
+assert (out / "omni_doc.mp3").exists() and (out / "omni_doc.mp4").exists(), w.tts_result.text()
+tts = [r for r in REQS if r["cmd"] == "tts"]
+assert len(tts) == 2 and tts[0]["prompt"].endswith(ov[0]["provider_voice_id"] + ".pt"), tts
+assert tts[0]["instruct"] == "male, low pitch" and tts[0]["speed"] == 1.2 and tts[0]["language"] == "vi", tts[0]
+assert tts[0]["config"]["num_step"] == 16 and tts[0]["config"]["denoise"] is False and tts[0]["normalize_text"] is True
+assert main.usage.summary(storage.ConfigStore().load()["inworld_usage"])["chars"] == u0
+# fixed duration: one request for the whole text, speed ignored
+w.ov_fields["duration"].setValue(2.0); pump(); REQS.clear()
+w.tts_filename.setText("omni_2s"); w.tts_format.buttons["mp3"].click(); w.start_tts(); wait_workers(60)
+tts = [r for r in REQS if r["cmd"] == "tts"]
+assert len(tts) == 1 and tts[0]["duration"] == 2.0 and "speed" not in tts[0], tts
+assert 1.7 < media.probe_duration(str(out / "omni_2s.mp3")) < 2.4
+w.ov_fields["duration"].setValue(0.0); pump()
+# voice design: preview, then keep exactly that voice
+w.go(main.PAGE_OMNI); pump(); REQS.clear()
+w.design_combos[0].setCurrentIndex(w.design_combos[0].findData("female"))
+w.design_combos[2].setCurrentIndex(w.design_combos[2].findData("high pitch"))
+assert w._design_instruct() == "female, high pitch"
+assert not w.design_save_btn.isEnabled()
+w.design_preview(); wait_workers(60)
+assert w.design_last and Path(w.design_last["wav"]).is_file() and w.design_save_btn.isEnabled(), w.design_status.text()
+assert REQS[-1]["instruct"] == "female, high pitch" and REQS[-1]["prompt"] is None and REQS[-1]["language"] == "vi", REQS[-1]
+w.design_name.setText("Nữ trẻ giọng cao"); w.design_save(); wait_workers(60)
+des = [v for v in vs.list() if v.get("ov_kind") == "design"]
+assert len(des) == 1 and des[0]["instruct"] == "female, high pitch" and des[0]["ref_text"] == main.DESIGN_TEXT["vi"], des
+assert REQS[-1]["cmd"] == "prompt" and REQS[-1]["ref_text"] == main.DESIGN_TEXT["vi"]
+assert w._voice_from_combo(w.tts_voice)["uid"] == des[0]["uid"]            # selected for reading right away
+for c in w.design_combos: c.setCurrentIndex(0)
+assert w._design_instruct() == ""                                           # all "Tự động" = Auto Voice
+shot("omni_page")
+# batch with the designed voice: the "LỖI" row fails inside the engine, the others are written
+w.go(main.PAGE_BATCH); w.batch_voice.setCurrentIndex(w.batch_voice.findData(des[0]["uid"])); pump()
+assert not w.ov_boxes["batch"].isHidden() and w.iw_opts["batch"]["box"].isHidden()
+w.batch_rows.setText(""); w._batch_load_tasks(); pump()
+assert "💵" not in w.batch_status.text(), w.batch_status.text()
+out3 = tmp / "out_omni"; w.batch_output_dir.setText(str(out3)); w.batch_threads.setValue(3); w.batch_merge.setChecked(True)
+w.start_batch()
+t0 = time.time()
+while (w.batch_worker.isRunning() or not w.batch_run.isEnabled()) and time.time() - t0 < 120: pump(2)
+pump()
+assert w.batch_state.count("ok") == 5 and w.batch_state.count("error") == 1, w.batch_state
+assert "Giả lập lỗi" in w.batch_table.item(2, main.B_STATUS).text(), w.batch_table.item(2, main.B_STATUS).text()
+assert (out3 / "kich_ban_GOP.mp3").exists(), sorted(p.name for p in out3.iterdir())
+w.batch_merge.setChecked(False); w.batch_rows.setText("2, 5-")
+# preview + delete: an OmniVoice voice lives only on this computer, so deleting removes its files
+w._preview_voice("OmniVoice", des[0]["provider_voice_id"], des[0]["local_name"], "vi", "pv_omni"); wait_workers(60)
+assert (storage.APP_DIR / "preview" / "pv_omni.mp3").exists()
+w.go(main.PAGE_CLONE); w.voice_table.selectRow(w.voice_table.rowCount() - 1); pump()
+QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+w.remove_selected_voice(); pump()
+QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.No)
+assert not [v for v in vs.list() if v.get("ov_kind") == "design"]
+assert not omni.voice_prompt(des[0]["provider_voice_id"]).exists()
+# engine controls
+assert omni.ENGINE.running()
+w.omni_load(); wait_workers(30); assert omni.ENGINE.device == "giả lập" and "giả lập" in w.omni_status.text()
+w.omni_stop(); pump(); assert not omni.ENGINE.running() and not w.omni_stop_btn.isEnabled()
+omni.ENGINE.request = _real_request
+# not installed: nothing is sent, the user is taken to the OmniVoice page (the warning box counts as 1 dialog)
+n_err = len(errors)
+os.environ.pop("TTS_OMNI_FAKE"); w._refresh_omni(); pump()
+# (a Mac with an Intel chip cannot run OmniVoice at all: the page says so instead of offering the install)
+expect = "không chạy được" if omni.unsupported_reason() else "Chưa cài"
+assert expect in w.omni_status.text() and "⚪" in w.chip_omni.text() and not w.omni_load_btn.isEnabled(), w.omni_status.text()
+assert w.omni_install_btn.isEnabled() == (not omni.unsupported_reason())
+assert "Cài đặt bộ máy" in w.omni_install_btn.text()
+w.go(main.PAGE_TTS); w.tts_voice.setCurrentIndex(w.tts_voice.findData(OV)); pump()
+assert not w._provider_ready("OmniVoice") and w.stack.currentIndex() == main.PAGE_OMNI
+assert len(errors) == n_err + 1 and "Chưa cài OmniVoice" in errors[-1], errors[n_err:]
+del errors[n_err:]
+os.environ["TTS_OMNI_FAKE"] = "1"; w._refresh_omni(); pump()
+w.ov_fields["num_step"].setValue(8); w._ov_reset(); pump()
+assert w.ov_fields["num_step"].value() == 32 and w.ov_fields["denoise"].isChecked() and not w.ov_fields["normalize_text"].isChecked()
+
+# ================= 3.0: two looks (classic / Youwee), both modes, every page
+w.tts_voice.setCurrentIndex(w.tts_voice.findData("u2")); pump()
 w.tts_format.buttons["mp3"].click()
-for mode in ("dark", "light"):
-    w.apply_theme(mode); pump()
-    for i, n in enumerate(["clone", "tts", "batch", "video", "settings", "usage", "update", "guide"]):
-        w.go(i)
-        if n == "video": w._update_video_preview()
-        shot(f"{mode}_{i}_{n}")
+PAGES = ["clone", "tts", "batch", "video", "omni", "settings", "usage", "update", "guide"]
+assert w.ui_style.value() == "classic" and not w.ui_theme.isEnabled()
+for style in ("classic", "youwee"):
+    w.ui_style.set_value(style, emit=True); pump()
+    assert storage.ConfigStore().load()["ui_style"] == style
+    for mode in ("dark", "light"):
+        w.apply_theme(mode); pump()
+        for i, n in enumerate(PAGES):
+            w.go(i)
+            if n == "video": w._update_video_preview()
+            sa = w.stack.widget(i).findChild(main.QScrollArea)
+            assert sa.horizontalScrollBar().maximum() == 0, (style, mode, n, sa.horizontalScrollBar().maximum())
+            shot(f"{style}_{mode}_{i}_{n}")
+assert w.ui_theme.isEnabled() and "Nunito" in app.styleSheet()
+w.ui_theme.set_value("sunset", emit=True); pump()
+assert storage.ConfigStore().load()["ui_theme"] == "sunset" and main.youwee_colors("light", "sunset")["primary"] in app.styleSheet()
+shot("youwee_sunset_settings", None) if not w.go(main.PAGE_SETTINGS) else None
+w.ui_style.set_value("classic", emit=True); pump()
+assert "Nunito" not in app.styleSheet()
 w.close(); pump()
+assert not omni.ENGINE.running()
 print("errors:", len(errors))
 for e in errors: print(e[:600])
 sys.exit(1 if errors else 0)

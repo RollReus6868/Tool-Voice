@@ -12,3 +12,5 @@
 *.icns binary
 *.png  binary
 *.xlsx binary
+*.tsv  text eol=lf
+*.ttf  binary

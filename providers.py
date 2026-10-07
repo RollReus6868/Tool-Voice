@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import binascii
 import os
 import tempfile
 import time
@@ -10,23 +9,26 @@ from typing import Callable
 
 import requests
 
-from media import merge_audio_files
-from utils import slug_voice_id, split_text
+import omni
+from media import merge_audio_files, to_wav, wav_to_mp3
+from omni import CancelledError, ProviderError   # defined in omni.py; re-exported for the rest of the app
+from utils import split_text
 
 LogFn = Callable[[str], None] | None
 CancelFn = Callable[[], bool] | None
 
 # ---------------------------------------------------------------- catalogues
-PROVIDERS = ["Inworld", "MiniMax"]
+PROVIDERS = ["Inworld", "OmniVoice"]
+FREE_PROVIDERS = {"OmniVoice"}          # run on this computer: no API key, no per-character fee
 
 MODELS = {
     # first entry = default (fast and cheapest per character)
     "Inworld": ["inworld-tts-2-flash", "inworld-tts-2", "inworld-tts-1.5-max", "inworld-tts-1.5-mini"],
-    "MiniMax": ["speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo",
-                "speech-02-hd", "speech-02-turbo"],
+    # a HuggingFace repo id, or the folder of a checkpoint on this computer (the box is editable)
+    "OmniVoice": [omni.DEFAULT_MODEL],
 }
 
-SPEED_RANGE = {"Inworld": (0.5, 1.5), "MiniMax": (0.5, 2.0)}
+SPEED_RANGE = {"Inworld": (0.5, 1.5), "OmniVoice": (0.5, 1.5)}
 
 # Inworld "Delivery" (the Playground slider). inworld-tts-2 reads deliveryMode;
 # older/flash models read temperature instead (each model ignores the other field).
@@ -35,19 +37,14 @@ DELIVERY_TEMPERATURE = {code: temp for code, _label, temp in DELIVERY}
 INSTRUCTION_MODELS = {"inworld-tts-2"}   # models that accept a speaking-style instruction
 
 LANGUAGES = {
-    # label, API value (Inworld = BCP-47 / empty = auto; MiniMax = language_boost)
+    # label, API value (Inworld = BCP-47 / empty = auto; OmniVoice = its language id / empty = auto)
     "Inworld": [
         ("Tự động nhận diện", ""), ("Tiếng Việt", "vi-VN"), ("English (US)", "en-US"),
         ("English (UK)", "en-GB"), ("中文 (Chinese)", "zh-CN"), ("日本語 (Japanese)", "ja-JP"),
         ("한국어 (Korean)", "ko-KR"), ("Español", "es-ES"), ("Français", "fr-FR"),
         ("Deutsch", "de-DE"), ("Português", "pt-BR"), ("Русский", "ru-RU"),
     ],
-    "MiniMax": [
-        ("Tự động nhận diện", "auto"), ("Tiếng Việt", "Vietnamese"), ("English", "English"),
-        ("中文 (Chinese)", "Chinese"), ("日本語 (Japanese)", "Japanese"), ("한국어 (Korean)", "Korean"),
-        ("ภาษาไทย (Thai)", "Thai"), ("Bahasa Indonesia", "Indonesian"), ("Español", "Spanish"),
-        ("Français", "French"), ("Deutsch", "German"), ("Português", "Portuguese"), ("Русский", "Russian"),
-    ],
+    "OmniVoice": omni.languages(),
 }
 
 _LEGACY_INWORLD = {"AUTO": "", "EN_US": "en-US", "VI_VN": "vi-VN", "ES_ES": "es-ES",
@@ -58,7 +55,7 @@ def normalize_language(provider: str, value: str | None) -> str:
     value = (value or "").strip()
     if provider == "Inworld":
         return _LEGACY_INWORLD.get(value.upper(), value) if value else ""
-    return value or "auto"
+    return value
 
 
 def language_label(provider: str, value: str | None) -> str:
@@ -70,14 +67,6 @@ def language_label(provider: str, value: str | None) -> str:
 
 
 # ---------------------------------------------------------------- errors
-class ProviderError(RuntimeError):
-    pass
-
-
-class CancelledError(ProviderError):
-    pass
-
-
 class _Retryable(Exception):
     pass
 
@@ -320,136 +309,90 @@ class InworldProvider(BaseProvider):
         return out
 
 
-# ---------------------------------------------------------------- MiniMax
-class MiniMaxProvider(BaseProvider):
-    name = "MiniMax"
-    max_chars = 5000  # API limit < 10,000; smaller chunks are more reliable
+# ---------------------------------------------------------------- OmniVoice (free, on this computer)
+class OmniVoiceProvider(BaseProvider):
+    """Talks to the local OmniVoice engine (omni.py). A library voice is a saved
+    voice-clone prompt, so the same voice comes back for every row of a batch."""
 
-    RETRY_CODES = {1000, 1001, 1002, 1039}
+    name = "OmniVoice"
+    max_chars = 500   # short requests = steady progress and a quick stop; the engine joins them seamlessly
 
-    def __init__(self, api_key: str, base_url: str = "https://api.minimax.io", group_id: str = "",
-                 log: LogFn = None, cancel: CancelFn = None) -> None:
-        super().__init__(api_key, base_url or "https://api.minimax.io", log, cancel)
-        self.group_id = (group_id or "").strip()
-        if self.api_key.lower().startswith("bearer "):
-            self.api_key = self.api_key[7:].strip()
+    def __init__(self, config: dict | None = None, log: LogFn = None, cancel: CancelFn = None) -> None:
+        super().__init__("", "", log, cancel)
+        self.config = config or {}
+        self.session.close()             # no HTTP here
+        self.last_ref_text = ""
 
-    @property
-    def headers(self) -> dict:
-        return {"Authorization": f"Bearer {self.api_key}"}
+    def _ask(self, req: dict, model: str = "") -> dict:
+        req["model"] = (model or "").strip() or omni.DEFAULT_MODEL
+        return omni.ENGINE.request(req, log=self.log, cancel=self.cancel)
 
-    def _params(self) -> dict | None:
-        return {"GroupId": self.group_id} if self.group_id else None
+    def _wav_request(self, req: dict, model: str) -> bytes:
+        with tempfile.TemporaryDirectory(prefix="tts_omni_") as td:
+            wav, mp3 = str(Path(td) / "a.wav"), str(Path(td) / "a.mp3")
+            self._ask({**req, "out": wav}, model)
+            wav_to_mp3(wav, mp3)
+            return Path(mp3).read_bytes()
 
-    def _check_payload(self, data: dict) -> None:
-        base = data.get("base_resp") or {}
-        code = base.get("status_code", 0)
-        if code in (0, None):
-            return
-        msg = base.get("status_msg", "")
-        if code in self.RETRY_CODES:
-            raise _Retryable(f"MiniMax bận/giới hạn tốc độ ({code}: {msg})")
-        hints = {
-            1004: "API key sai hoặc hết hạn",
-            1008: "Tài khoản hết số dư",
-            1026: "Nội dung bị bộ lọc an toàn chặn",
-            1042: "Văn bản chứa quá nhiều ký tự không hợp lệ",
-            2013: "Tham số không hợp lệ (kiểm tra Voice ID / model / ngôn ngữ)",
-            2037: "Độ dài file mẫu không phù hợp",
-            2038: "Tài khoản chưa được phép clone giọng",
-            2039: "Voice ID đã tồn tại",
-            2042: "Không có quyền dùng Voice ID này (có thể đã bị xóa do 7 ngày không dùng)",
-        }
-        hint = hints.get(code, "")
-        raise ProviderError(f"MiniMax lỗi {code}: {msg}" + (f" — {hint}" if hint else ""))
-
-    def clone_voice(self, sample_path, display_name, language="auto", denoise=False) -> str:
-        self.log("📤 Đang upload mẫu giọng lên MiniMax…")
-        with open(sample_path, "rb") as f:
-            data = self._request(
-                "POST", f"{self.base_url}/v1/files/upload", headers=self.headers, params=self._params(),
-                files={"file": (os.path.basename(sample_path), f)}, data={"purpose": "voice_clone"},
-                timeout=300, retries=1,
-            )
+    def clone_voice(self, sample_path, display_name, language="", denoise=False, ref_text: str = "",
+                    model: str = "") -> str:
+        """Encode the sample once into a reusable prompt. Empty ref_text = Whisper writes it."""
+        voice_id = omni.new_voice_id()
+        wav = omni.voice_wav(voice_id)
+        self.log("🎚 Đang chuẩn bị file mẫu (WAV 24 kHz)…")
+        to_wav(sample_path, str(wav))
+        if not ref_text.strip():
+            self.log("📝 Chưa có lời thoại của mẫu — OmniVoice tự chép lại bằng Whisper "
+                     "(lần đầu phải tải model Whisper ~1,6 GB)…")
         try:
-            file_id = int(data["file"]["file_id"])
-        except Exception as exc:
-            raise ProviderError(f"MiniMax không trả file_id: {str(data)[:300]}") from exc
-
-        voice_id = slug_voice_id(display_name)
-        payload = {
-            "file_id": file_id,
-            "voice_id": voice_id,
-            "need_noise_reduction": bool(denoise),
-            "need_volume_normalization": True,
-        }
-        lang = normalize_language("MiniMax", language)
-        if lang and lang != "auto":
-            payload["language_boost"] = lang
-        self.log(f"🧬 Đang tạo giọng MiniMax (voice_id={voice_id})…")
-        self._request("POST", f"{self.base_url}/v1/voice_clone",
-                      headers={**self.headers, "Content-Type": "application/json"},
-                      params=self._params(), json=payload, timeout=300, retries=2)
+            res = self._ask({"cmd": "prompt", "audio": str(wav), "ref_text": ref_text.strip() or None,
+                             "preprocess": bool(self.config.get("ov_preprocess_prompt", True)),
+                             "out": str(omni.voice_prompt(voice_id))}, model)
+        except BaseException:
+            omni.delete_voice(voice_id)
+            raise
+        self.last_ref_text = res.get("ref_text") or ref_text.strip()
         return voice_id
 
-    def synth_chunk(self, text, voice_id, *, model, speed, language, options=None) -> bytes:
-        lo, hi = SPEED_RANGE["MiniMax"]
-        payload = {
-            "model": model or MODELS["MiniMax"][0],
-            "text": text,
-            "stream": False,
-            "voice_setting": {"voice_id": voice_id, "speed": round(max(lo, min(hi, float(speed or 1.0))), 2),
-                              "vol": 1.0, "pitch": 0},
-            "audio_setting": {"sample_rate": 44100, "bitrate": 128000, "format": "mp3", "channel": 1},
-            "language_boost": normalize_language("MiniMax", language),
-            "output_format": "hex",
-        }
-        data = self._request("POST", f"{self.base_url}/v1/t2a_v2",
-                             headers={**self.headers, "Content-Type": "application/json"},
-                             params=self._params(), json=payload, timeout=300)
-        audio = (data.get("data") or {}).get("audio")
-        if not audio:
-            raise ProviderError(f"MiniMax không trả audio: {str(data)[:300]}")
-        used = (data.get("extra_info") or {}).get("usage_characters")
-        self.chars_used += int(used) if isinstance(used, (int, float)) and used > 0 else len(text)
-        if isinstance(audio, str) and audio.startswith(("http://", "https://")):
-            return self._request("GET", audio, timeout=180, json_body=False).content
-        try:
-            return binascii.unhexlify(audio)
-        except (binascii.Error, TypeError) as exc:
-            raise ProviderError("Audio MiniMax trả về không hợp lệ.") from exc
+    def transcribe(self, sample_path: str, model: str = "") -> str:
+        with tempfile.TemporaryDirectory(prefix="tts_omni_") as td:
+            wav = str(Path(td) / "ref.wav")
+            to_wav(sample_path, wav)
+            return self._ask({"cmd": "transcribe", "audio": wav}, model).get("text", "")
 
-    def list_voices(self) -> list[dict]:
-        data = self._request("POST", f"{self.base_url}/v1/get_voice",
-                             headers={**self.headers, "Content-Type": "application/json"},
-                             params=self._params(), json={"voice_type": "all"}, timeout=60, retries=2)
-        out = []
-        for key, kind in (("voice_cloning", "Của tôi"), ("voice_generation", "Của tôi"), ("system_voice", "Hệ thống")):
-            for v in data.get(key) or []:
-                desc = v.get("description") or []
-                out.append({
-                    "voice_id": v.get("voice_id", ""),
-                    "name": v.get("voice_name") or v.get("voice_id", ""),
-                    "kind": kind,
-                    "language": "",
-                    "gender": "",
-                    "description": " ".join(desc) if isinstance(desc, list) else str(desc or ""),
-                    "tags": [],
-                    "source": key,
-                })
-        return out
+    def design(self, text: str, instruct: str, output_wav: str, *, language: str = "", model: str = "",
+               options: dict | None = None) -> str:
+        """Voice Design / Auto Voice: no reference, the engine invents a voice matching `instruct`."""
+        self._ask(omni.tts_request(text, output_wav, language=language, instruct=instruct, options=options), model)
+        return output_wav
+
+    def synthesize(self, text, voice_id, output_path, *, model="", speed=1.0, language="", options=None) -> str:
+        # a fixed duration applies to one request, so the text must not be split by the app then
+        self.max_chars = 10 ** 9 if float((options or {}).get("duration") or 0) > 0 else type(self).max_chars
+        return super().synthesize(text, voice_id, output_path, model=model, speed=speed, language=language,
+                                  options=options)
+
+    def synth_chunk(self, text, voice_id, *, model, speed, language, options=None) -> bytes:
+        prompt = omni.voice_prompt(voice_id)
+        if not prompt.is_file():
+            raise ProviderError("Không tìm thấy dữ liệu của giọng OmniVoice này trên máy (đã bị xoá hoặc được tạo ở "
+                                "máy khác) — hãy clone/thiết kế lại giọng.")
+        lo, hi = SPEED_RANGE["OmniVoice"]
+        req = omni.tts_request(text, "", language=language, prompt=str(prompt),
+                               speed=max(lo, min(hi, float(speed or 1.0))), options=options)
+        audio = self._wav_request(req, model)
+        self.chars_used += len(text)
+        return audio
 
 
 # ---------------------------------------------------------------- factory
 def build_provider(provider_name: str, secrets: dict, config: dict, log: LogFn = None,
                    cancel: CancelFn = None) -> BaseProvider:
-    if provider_name == "Inworld":
-        key = (secrets.get("inworld_api_key") or "").strip()
-        if not key:
-            raise ProviderError("Chưa nhập Inworld API key (mục ⚙ Cài đặt).")
-        return InworldProvider(key, config.get("inworld_base_url", ""), log=log, cancel=cancel)
-    key = (secrets.get("minimax_api_key") or "").strip()
+    if provider_name == "OmniVoice":
+        return OmniVoiceProvider(config, log=log, cancel=cancel)
+    if provider_name != "Inworld":
+        raise ProviderError(f"Nhà cung cấp “{provider_name}” không còn được hỗ trợ.")
+    key = (secrets.get("inworld_api_key") or "").strip()
     if not key:
-        raise ProviderError("Chưa nhập MiniMax API key (mục ⚙ Cài đặt).")
-    return MiniMaxProvider(key, config.get("minimax_base_url", ""), config.get("minimax_group_id", ""),
-                           log=log, cancel=cancel)
+        raise ProviderError("Chưa nhập Inworld API key (mục ⚙ Cài đặt).")
+    return InworldProvider(key, config.get("inworld_base_url", ""), log=log, cancel=cancel)

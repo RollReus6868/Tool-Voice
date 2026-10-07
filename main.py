@@ -18,14 +18,17 @@ from PyQt6.QtWidgets import (
     QStackedWidget, QTableWidget, QTableWidgetItem, QTextBrowser, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from storage import APP_DIR, APP_NAME, APP_VERSION, LOG_PATH, ConfigStore, SecretStore, VoiceStore, migrate
-from theme import ACCENTS, LOG_COLORS, PROVIDER_ACCENT, STATUS_COLORS, build_stylesheet, make_arrow_icons
+from storage import (APP_DIR, APP_NAME, APP_VERSION, LOG_PATH, REMOVED_PROVIDERS, ConfigStore, SecretStore,
+                     VoiceStore, migrate)
+from theme import (ACCENTS, LOG_COLORS, PROVIDER_ACCENT, PROVIDER_ICON, STATUS_COLORS, YOUWEE_THEMES,
+                   build_stylesheet, load_fonts, make_arrow_icons, youwee_colors)
 from media import VIDEO_SIZES, find_ffmpeg, make_video, probe_duration
 from providers import DELIVERY, INSTRUCTION_MODELS, LANGUAGES, MODELS, SPEED_RANGE, build_provider, language_label
 from utils import fmt_duration, parse_row_selection, safe_filename, sample_hint, split_text, validate_voice_sample
+import omni
 import usage
-from widgets import (TOTAL_COLOR, Card, ChoiceRow, ResponsiveRow, StatTile, UsageBarChart, UsageDonut, button,
-                     label)
+from widgets import (TOTAL_COLOR, Card, ChoiceRow, GlowBackground, GradientLabel, ResponsiveRow, StatTile,
+                     UsageBarChart, UsageDonut, button, label)
 from workers import BatchWorker, FuncWorker, produce_outputs
 import updater
 from app_info import GITHUB_REPO
@@ -44,12 +47,18 @@ NAV = [
     ("🗣", "Đọc văn bản", "blue"),
     ("📊", "Hàng loạt Excel", "green"),
     ("🎬", "Video MP4", "pink"),
+    ("🌍", "OmniVoice", "violet"),
     ("⚙", "Cài đặt API", "amber"),
     ("📈", "Mức dùng", "violet"),
     ("🔄", "Cập nhật", "teal"),
     ("📖", "Hướng dẫn", "cyan"),
 ]
-PAGE_CLONE, PAGE_TTS, PAGE_BATCH, PAGE_VIDEO, PAGE_SETTINGS, PAGE_USAGE, PAGE_UPDATE, PAGE_GUIDE = range(8)
+(PAGE_CLONE, PAGE_TTS, PAGE_BATCH, PAGE_VIDEO, PAGE_OMNI, PAGE_SETTINGS, PAGE_USAGE, PAGE_UPDATE,
+ PAGE_GUIDE) = range(9)
+UI_STYLES = [("classic", "🎨  Cổ điển (nhiều màu)", "violet"), ("youwee", "🧊  Youwee (kính mờ, 1 màu nhấn)", "blue")]
+DESIGN_TEXT = {"vi": "Xin chào, đây là giọng nói vừa được thiết kế. Bạn thấy giọng này thế nào?",
+               "en": "Hello, this is a freshly designed voice. How does it sound to you?"}
+OMNI_URL = "https://github.com/k2-fsa/OmniVoice"
 VIEW_FOR_DAYS = {1: "24h", 7: "7d", 30: "30d", 90: "90d"}
 UPDATE_EVERY_MS = 6 * 3600 * 1000
 
@@ -80,6 +89,10 @@ class MainWindow(QMainWindow):
         self.voice_store = VoiceStore()
         self.secret_store = SecretStore()
         self.config = self.config_store.load()
+        dropped = 0
+        if int(self.config.get("defaults_rev") or 0) < 3:      # 3.0: MiniMax was removed
+            dropped = self.voice_store.drop_providers(REMOVED_PROVIDERS)
+            self.secret_store.set("minimax_api_key", "")
         mig = migrate(self.config)
         if mig:
             self.config = self.config_store.save(mig)
@@ -96,6 +109,10 @@ class MainWindow(QMainWindow):
         self.latest_release = None
         self.batch_selected: set[int] = set()   # 0-based task indexes chosen by the STT filter
         self.iw_opts: dict[str, dict] = {}
+        self.ov_boxes: dict[str, QWidget] = {}
+        self.ov_fields: dict[str, QWidget] = {}
+        self.design_last: dict | None = None
+        self.omni_worker = None
         self.update_worker = None
         self._quitting_for_update = False
 
@@ -106,6 +123,9 @@ class MainWindow(QMainWindow):
         self._refresh_chips()
         self._restore_geometry()
         self.log(f"🎙 {APP_NAME} {APP_VERSION} sẵn sàng. Dữ liệu lưu tại: {APP_DIR}")
+        if dropped:
+            self.log(f"ℹ Bản 3.0 đã bỏ MiniMax: {dropped} giọng MiniMax được gỡ khỏi thư viện "
+                     f"(bản lưu: {APP_DIR / 'voices_removed.json'}).")
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(lambda: self.check_updates(silent=True))
         if self.config.get("auto_update", True) and not os.getenv("TTS_SELFCHECK") and not os.getenv("TTS_NO_UPDATE_CHECK"):
@@ -116,11 +136,12 @@ class MainWindow(QMainWindow):
                 and not os.getenv("TTS_SELFCHECK")):
             QTimer.singleShot(2500, lambda: self.sync_inworld_voices(silent=True))
         if not self.voice_store.list():
-            self.log("💡 Bắt đầu: vào ⚙ Cài đặt API nhập key → 🧬 Clone giọng (hoặc ☁ lấy giọng từ tài khoản).")
+            self.log("💡 Bắt đầu: dùng miễn phí với 🌍 OmniVoice (cài bộ máy một lần), hoặc vào ⚙ Cài đặt API "
+                     "nhập key Inworld → 🧬 Clone giọng.")
 
     # ================================================================ layout
     def _build_ui(self):
-        central = QWidget()
+        central = self.central = GlowBackground()
         central.setObjectName("Central")
         root = QVBoxLayout(central)
         root.setContentsMargins(14, 12, 14, 8)
@@ -132,7 +153,7 @@ class MainWindow(QMainWindow):
         body.addWidget(self._sidebar())
 
         self.stack = QStackedWidget()
-        for builder in (self._page_clone, self._page_tts, self._page_batch, self._page_video,
+        for builder in (self._page_clone, self._page_tts, self._page_batch, self._page_video, self._page_omni,
                         self._page_settings, self._page_usage, self._page_update, self._page_guide):
             self.stack.addWidget(builder())
 
@@ -170,7 +191,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(logo)
         tv = QVBoxLayout()
         tv.setSpacing(0)
-        t = QLabel(APP_NAME)
+        t = self.app_title = GradientLabel(APP_NAME)
         t.setObjectName("AppTitle")
         s = QLabel("Clone giọng  •  Đọc văn bản  •  MP3 / MP4 hàng loạt từ Excel")
         s.setObjectName("AppSub")
@@ -187,12 +208,14 @@ class MainWindow(QMainWindow):
         cb.addStretch()
         self.chip_ffmpeg = label("", chip="true")
         self.chip_inworld = label("", chip="true")
-        self.chip_minimax = label("", chip="true")
+        self.chip_omni = label("", chip="true")
+        self.chip_omni.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chip_omni.mousePressEvent = lambda _e: self.go(PAGE_OMNI)
         self.chip_voices = label("", chip="true")
         self.chip_usage = label("", chip="true")
         self.chip_usage.setCursor(Qt.CursorShape.PointingHandCursor)
         self.chip_usage.mousePressEvent = lambda _e: self.go(PAGE_USAGE)
-        for c in (self.chip_usage, self.chip_voices, self.chip_inworld, self.chip_minimax, self.chip_ffmpeg):
+        for c in (self.chip_usage, self.chip_voices, self.chip_inworld, self.chip_omni, self.chip_ffmpeg):
             cb.addWidget(c)
         lay.addWidget(self.chip_box, 1)
         self.update_chip = QPushButton("⬆  Có bản mới")
@@ -244,6 +267,8 @@ class MainWindow(QMainWindow):
 
     def go(self, idx: int):
         self.stack.setCurrentIndex(idx)
+        if idx == PAGE_OMNI:
+            self._refresh_omni()
         if idx == PAGE_VIDEO:
             QTimer.singleShot(0, self._update_video_preview)
         for i, b in enumerate(self.nav_buttons):
@@ -267,9 +292,7 @@ class MainWindow(QMainWindow):
         badge = QLabel(icon)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         badge.setFixedSize(46, 46)
-        main, light, dark = ACCENTS[accent]
-        badge.setStyleSheet(f"font-size:20pt; border-radius:12px; background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-                            f" stop:0 {light}, stop:1 {dark});")
+        badge.setProperty("pagebadge", accent)
         head.addWidget(badge)
         tv = QVBoxLayout()
         tv.setSpacing(0)
@@ -325,6 +348,60 @@ class MainWindow(QMainWindow):
         model_combo.currentTextChanged.connect(lambda _: self._sync_iw_options(key))
         return box
 
+    def _ov_options_box(self, key: str) -> QWidget:
+        """Shown instead of the Inworld options when the chosen voice is an OmniVoice one."""
+        box = QWidget()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(8)
+        r = QHBoxLayout()
+        r.setSpacing(8)
+        if key == "tts":
+            tags = QComboBox()
+            tags.addItem("➕ Chèn tiếng động…", "")
+            for tag, text in omni.NONVERBAL_TAGS:
+                tags.addItem(f"{tag}   {text}", tag)
+            tags.setToolTip("Chèn thẻ tiếng động (cười, thở dài, ngạc nhiên…) vào vị trí con trỏ trong văn bản.")
+            tags.activated.connect(lambda _i, c=tags: self._insert_tag(c))
+            r.addWidget(tags, 1)
+        r.addWidget(button("🎛 Thông số OmniVoice", size="small", tint="violet", slot=lambda: self.go(PAGE_OMNI),
+                           tip="Số bước, khử nhiễu, thời lượng cố định… áp dụng cho mọi lần đọc bằng OmniVoice"))
+        if key != "tts":
+            r.addStretch()
+        v.addLayout(r)
+        self.ov_boxes[key] = box
+        return box
+
+    def _insert_tag(self, combo: QComboBox):
+        tag = combo.currentData()
+        combo.setCurrentIndex(0)
+        if tag:
+            self.tts_text.insertPlainText(tag + " ")
+            self.tts_text.setFocus()
+
+    def _ov_options(self, voice: dict | None = None) -> dict:
+        """Generation settings of the OmniVoice page + the instruct saved with the voice."""
+        return {**omni.gen_options(self.config), "instruct": (voice or {}).get("instruct", "")}
+
+    def _ov_model(self) -> str:
+        return (self.config.get("model_OmniVoice") or "").strip() or omni.DEFAULT_MODEL
+
+    def _provider_ready(self, prov: str) -> bool:
+        """Inworld needs its API key, OmniVoice needs its engine installed."""
+        if prov == "OmniVoice":
+            if omni.is_installed():
+                return True
+            self.go(PAGE_OMNI)
+            QMessageBox.warning(self, "Chưa cài OmniVoice",
+                                "Giọng OmniVoice chạy trên máy của bạn nên cần cài bộ máy một lần.\n"
+                                "Bấm “⬇ Cài đặt bộ máy” ở trang 🌍 OmniVoice.")
+            return False
+        if self._secrets()["inworld_api_key"]:
+            return True
+        self.go(PAGE_SETTINGS)
+        QMessageBox.warning(self, "Thiếu API key", f"Hãy nhập API key {prov} ở trang Cài đặt.")
+        return False
+
     def _sync_iw_options(self, key: str):
         o = self.iw_opts.get(key)
         if not o:
@@ -333,6 +410,8 @@ class MainWindow(QMainWindow):
         voice = self._voice_from_combo(combo)
         is_iw = bool(voice) and voice.get("provider") == "Inworld"
         o["box"].setVisible(is_iw)
+        if key in self.ov_boxes:
+            self.ov_boxes[key].setVisible(bool(voice) and voice.get("provider") == "OmniVoice")
         model = o["model"].currentText().strip()
         ok = model in INSTRUCTION_MODELS
         o["instruction"].setEnabled(ok)
@@ -375,7 +454,8 @@ class MainWindow(QMainWindow):
 
         form = Card("Tạo giọng mới", "violet")
         form.add(label("① Chọn nhà cung cấp", role="field"))
-        self.clone_provider = ChoiceRow([("Inworld", "🌊  Inworld", "teal"), ("MiniMax", "🌸  MiniMax", "pink")])
+        self.clone_provider = ChoiceRow([("Inworld", "🌊  Inworld", "teal"),
+                                         ("OmniVoice", "🌍  OmniVoice (miễn phí)", "violet")])
         self.clone_provider.changed.connect(self._clone_provider_changed)
         form.add(self.clone_provider)
         self.clone_rules = label("", role="hint", wrap=True)
@@ -384,7 +464,7 @@ class MainWindow(QMainWindow):
         form.add(label("② File giọng mẫu", role="field"))
         sr = QHBoxLayout()
         self.clone_sample = QLineEdit()
-        self.clone_sample.setPlaceholderText("Chọn file WAV / MP3 / M4A…")
+        self.clone_sample.setPlaceholderText("Chọn file giọng mẫu…")
         self.clone_sample.editingFinished.connect(self._validate_sample)
         sr.addWidget(self.clone_sample, 1)
         sr.addWidget(button("📂 Chọn", tint="violet", slot=self._browse_clone_sample, tip="Chọn file giọng mẫu"))
@@ -407,6 +487,30 @@ class MainWindow(QMainWindow):
         g.addWidget(label("Ngôn ngữ", role="muted"), 1, 0)
         g.addWidget(self.clone_language, 1, 1)
         form.add(g)
+        # OmniVoice only: transcript of the sample (empty = Whisper writes it) + optional instruct
+        self.clone_ov_box = QWidget()
+        ov = QVBoxLayout(self.clone_ov_box)
+        ov.setContentsMargins(0, 0, 0, 0)
+        ov.setSpacing(6)
+        ovh = QHBoxLayout()
+        ovh.addWidget(label("Lời thoại trong file mẫu", role="muted"), 1)
+        self.clone_transcribe = button("📝 Tự chép lời", size="small", tint="cyan", slot=self.transcribe_sample,
+                                       tip="Để OmniVoice (Whisper) nghe file mẫu và chép lại lời — rồi bạn sửa nếu sai")
+        ovh.addWidget(self.clone_transcribe)
+        ov.addLayout(ovh)
+        self.clone_ref_text = QTextEdit()
+        self.clone_ref_text.setAcceptRichText(False)
+        self.clone_ref_text.setFixedHeight(62)
+        self.clone_ref_text.setPlaceholderText("Đúng từng chữ trong mẫu • trống = máy tự chép")
+        self.clone_ref_text.setToolTip("Chép đúng từng chữ người trong file mẫu nói — lời thoại càng khớp, giọng clone càng "
+                                       "giống. Để trống thì OmniVoice tự chép bằng Whisper khi clone (chậm hơn một chút).")
+        ov.addWidget(self.clone_ref_text)
+        self.clone_instruct = QLineEdit()
+        self.clone_instruct.setPlaceholderText("Instruct (tuỳ chọn), ví dụ: female, low pitch")
+        self.clone_instruct.setToolTip("Mô tả kèm theo giọng (giới tính, độ tuổi, cao độ, giọng địa phương…) bằng từ khoá "
+                                       "của OmniVoice. Khớp với file mẫu thì clone ổn định hơn; thường để trống.")
+        ov.addWidget(self.clone_instruct)
+        form.add(self.clone_ov_box)
         self.clone_denoise = QCheckBox("🔇  Lọc tạp âm nền trong file mẫu")
         form.add(self.clone_denoise)
         self.clone_consent = QCheckBox("Tôi là chủ giọng nói này hoặc đã được\nngười nói đồng ý cho phép clone.")
@@ -442,7 +546,8 @@ class MainWindow(QMainWindow):
         self.voice_table.setMinimumHeight(260)
         self.voice_table.doubleClicked.connect(lambda _: self.use_selected_voice())
         lib.add(self.voice_table)
-        self.voice_empty = label("📭 Chưa có giọng nào. Clone giọng mới ở bên trái, hoặc bấm ☁ Lấy từ tài khoản.",
+        self.voice_empty = label("📭 Chưa có giọng nào. Clone giọng mới ở bên trái, thiết kế giọng ở trang 🌍 OmniVoice, "
+                                 "hoặc bấm ☁ Duyệt giọng Inworld.",
                                  role="hint", wrap=True)
         lib.add(self.voice_empty)
         r1 = QHBoxLayout()
@@ -464,11 +569,12 @@ class MainWindow(QMainWindow):
         r2.addStretch()
         lib.add(r2)
         r3 = QHBoxLayout()
-        r3.addWidget(button("☁  Lấy từ MiniMax", tint="pink", slot=lambda: self.import_voices("MiniMax"),
-                            tip="Tải danh sách giọng trên tài khoản MiniMax của bạn"))
+        r3.addWidget(button("🎨  Thiết kế giọng OmniVoice", tint="violet", slot=lambda: self.go(PAGE_OMNI),
+                            tip="Tạo giọng mới không cần file mẫu: chọn giới tính, độ tuổi, cao độ… (miễn phí)"))
         r3.addStretch()
         r3.addWidget(button("🗑  Xóa", tint="red", slot=self.remove_selected_voice,
-                            tip="Chỉ xóa khỏi danh sách trong app, giọng trên tài khoản vẫn còn"))
+                            tip="Xóa khỏi thư viện trong app. Giọng Inworld vẫn còn trên tài khoản; "
+                                "giọng OmniVoice bị xóa hẳn khỏi máy"))
         lib.add(r3)
         row.add(lib, 1)
         lay.addWidget(row, 1)
@@ -552,6 +658,7 @@ class MainWindow(QMainWindow):
         g.setColumnStretch(1, 1)
         top.add(g)
         top.add(self._iw_options_box("tts", self.tts_model))
+        top.add(self._ov_options_box("tts"))
         self.tts_usage = label("", role="hint", wrap=True)
         top.add(self.tts_usage)
         right.addWidget(top)
@@ -662,7 +769,8 @@ class MainWindow(QMainWindow):
         self.batch_threads = QSpinBox()
         self.batch_threads.setRange(1, 6)
         self.batch_threads.setSuffix(" luồng")
-        self.batch_threads.setToolTip("Số dòng xử lý cùng lúc. 2–3 là an toàn; quá cao dễ bị giới hạn tốc độ API.")
+        self.batch_threads.setToolTip("Số dòng xử lý cùng lúc. 2–3 là an toàn; quá cao dễ bị giới hạn tốc độ API.\n"
+                                      "Giọng OmniVoice: máy chỉ đọc được từng dòng một, nhiều luồng không nhanh hơn.")
         self.batch_skip = QCheckBox("Bỏ qua dòng đã có file")
         self.batch_skip.setToolTip("Chạy tiếp từ chỗ dừng: dòng nào đã có file đầu ra sẽ không tạo lại (không tốn phí).")
         self.batch_merge = QCheckBox("Gộp tất cả thành 1 file (thêm file _GOP)")
@@ -690,6 +798,7 @@ class MainWindow(QMainWindow):
         cg.setColumnStretch(1, 1)
         cfg.add(cg)
         cfg.add(self._iw_options_box("batch", self.batch_model))
+        cfg.add(self._ov_options_box("batch"))
         cfg.body.addStretch()
         row.add(cfg, 1)
         lay.addWidget(row)
@@ -830,7 +939,8 @@ class MainWindow(QMainWindow):
 
     def _page_settings(self):
         page, lay, _ = self._page("⚙", "Cài đặt API",
-                                  "Nhập API key của nhà cung cấp. Key được cất trong Windows Credential Manager, không ghi ra file.",
+                                  "API key Inworld (cất trong Windows Credential Manager, không ghi ra file), "
+                                  "bộ máy OmniVoice miễn phí và kiểu giao diện.",
                                   "amber")
         row = ResponsiveRow(820)
         self.responsive.append(row)
@@ -865,39 +975,33 @@ class MainWindow(QMainWindow):
         iw.body.addStretch()
         row.add(iw, 1)
 
-        mm = Card("🌸  MiniMax", "pink", "Clone 10 giây – 5 phút mẫu • tốc độ 0.5–2× • giọng clone bị xóa nếu 7 ngày không dùng")
-        g2 = QGridLayout()
-        g2.setHorizontalSpacing(10)
-        g2.setVerticalSpacing(8)
-        self.mm_key = QLineEdit()
-        self.mm_key.setPlaceholderText("Dán API key (Bearer) từ MiniMax")
-        self.mm_group = QLineEdit()
-        self.mm_group.setPlaceholderText("Không bắt buộc")
-        self.mm_base = QComboBox()
-        self.mm_base.setEditable(True)
-        self.mm_base.addItems(["https://api.minimax.io", "https://api-uw.minimax.io", "https://api.minimaxi.com"])
-        self.mm_base.setToolTip("api.minimax.io = quốc tế • api-uw = máy chủ Mỹ • api.minimaxi.com = Trung Quốc")
-        g2.addWidget(label("🔑 API key", role="field"), 0, 0)
-        g2.addLayout(self._key_row(self.mm_key), 0, 1)
-        g2.addWidget(label("👥 Group ID", role="field"), 1, 0)
-        g2.addWidget(self.mm_group, 1, 1)
-        g2.addWidget(label("🌐 Base URL", role="field"), 2, 0)
-        g2.addWidget(self.mm_base, 2, 1)
-        g2.setColumnStretch(1, 1)
-        mm.add(g2)
-        r2 = QHBoxLayout()
-        self.mm_test = button("🔌 Kiểm tra kết nối", tint="pink", slot=lambda: self.test_connection("MiniMax"))
-        r2.addWidget(self.mm_test)
-        r2.addWidget(button("🔗 Lấy API key", tint="blue", slot=lambda: QDesktopServices.openUrl(
-            QUrl("https://platform.minimax.io/user-center/basic-information/interface-key"))))
-        r2.addStretch()
-        mm.add(r2)
-        self.mm_test_result = label("", role="hint", wrap=True)
-        mm.add(self.mm_test_result)
-        mm.body.addStretch()
-        row.add(mm, 1)
+        ov = Card("🌍  OmniVoice", "violet", "Miễn phí • chạy trên máy của bạn, không cần API key • 600+ ngôn ngữ • "
+                                              "clone giọng từ 3–10 giây mẫu • thiết kế giọng không cần mẫu")
+        self.ov_settings_status = label("", role="hint", wrap=True)
+        ov.add(self.ov_settings_status)
+        orow = QHBoxLayout()
+        orow.addWidget(button("🌍  Mở trang OmniVoice", tint="violet", slot=lambda: self.go(PAGE_OMNI),
+                              tip="Cài bộ máy, thiết kế giọng, chỉnh thông số"))
+        orow.addWidget(button("🔗 Trang dự án", tint="blue", slot=lambda: QDesktopServices.openUrl(QUrl(OMNI_URL))))
+        orow.addStretch()
+        ov.add(orow)
+        ov.body.addStretch()
+        row.add(ov, 1)
         lay.addWidget(row)
         lay.addWidget(self._usage_link_card())
+
+        look = Card("🎨  Giao diện", "blue", "Đổi kiểu hiển thị của cả ứng dụng — mọi tính năng giữ nguyên. "
+                                              "Nút Sáng/Tối nằm ở góc trên bên phải.")
+        self.ui_style = ChoiceRow(UI_STYLES)
+        self.ui_style.set_value(self._ui_style())
+        self.ui_style.changed.connect(self._ui_changed)
+        look.add(self.ui_style)
+        self.ui_theme = ChoiceRow([(k, v[0], "blue") for k, v in YOUWEE_THEMES.items()])
+        self.ui_theme.set_value(self._ui_theme())
+        self.ui_theme.changed.connect(self._ui_changed)
+        self.ui_theme.setToolTip("Màu nhấn của kiểu Youwee")
+        look.add(self.ui_theme)
+        lay.addWidget(look)
 
         bottom = Card("Lưu & dữ liệu", "amber")
         br = QHBoxLayout()
@@ -907,7 +1011,7 @@ class MainWindow(QMainWindow):
         br.addStretch()
         bottom.add(br)
         bottom.add(label("🔒 API key lưu trong Windows Credential Manager (keyring). Danh sách giọng và cài đặt lưu ở "
-                         f"{APP_DIR}. Có thể đặt biến môi trường INWORLD_API_KEY / MINIMAX_API_KEY thay cho việc nhập tay.",
+                         f"{APP_DIR}. Có thể đặt biến môi trường INWORLD_API_KEY thay cho việc nhập tay.",
                          role="hint", wrap=True))
         lay.addWidget(bottom)
         lay.addStretch()
@@ -922,6 +1026,484 @@ class MainWindow(QMainWindow):
         r.addStretch()
         card.add(r)
         return card
+
+    # ================================================================ appearance
+    def _ui_style(self) -> str:
+        return "youwee" if self.config.get("ui_style") == "youwee" else "classic"
+
+    def _ui_theme(self) -> str:
+        t = self.config.get("ui_theme")
+        return t if t in YOUWEE_THEMES else "ocean"
+
+    def _ui_changed(self, _v=None):
+        self.config = self.config_store.save({"ui_style": self.ui_style.value(), "ui_theme": self.ui_theme.value()})
+        self.apply_theme(self.mode)
+
+    # ================================================================ OmniVoice page
+    def _page_omni(self):
+        page, lay, head = self._page(
+            "🌍", "OmniVoice — miễn phí, chạy trên máy",
+            "Model mã nguồn mở của k2-fsa: 600+ ngôn ngữ, clone giọng, thiết kế giọng không cần mẫu. Cài bộ máy một "
+            "lần (vài GB), sau đó đọc bao nhiêu cũng không tốn phí.", "violet")
+        head.addWidget(button("🔗 Dự án OmniVoice", tint="blue", slot=lambda: QDesktopServices.openUrl(QUrl(OMNI_URL))))
+        row = ResponsiveRow(1000)
+        self.responsive.append(row)
+        left = QVBoxLayout()
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(12)
+
+        # ---- engine
+        eng = Card("🧩  Bộ máy", "violet")
+        self.omni_status = label("", role="cardTitle")
+        self.omni_status.setWordWrap(True)
+        eng.add(self.omni_status)
+        self.omni_detail = label("", role="hint", wrap=True)
+        self.omni_detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        eng.add(self.omni_detail)
+        hg = QGridLayout()
+        hg.setHorizontalSpacing(10)
+        self.omni_hardware = QComboBox()
+        for code, text in omni.HARDWARE:
+            self.omni_hardware.addItem(text, code)
+        self.omni_hardware.setCurrentIndex(max(0, self.omni_hardware.findData(self.config.get("ov_hardware", "auto"))))
+        self.omni_hardware.setToolTip("Tự động: có card NVIDIA thì cài bản GPU (nhanh hơn nhiều lần), không thì bản CPU.\n"
+                                      "Máy Mac chip Apple luôn dùng GPU của máy.")
+        self.omni_hardware.currentIndexChanged.connect(
+            lambda _: setattr(self, "config", self.config_store.save({"ov_hardware": self.omni_hardware.currentData()})))
+        hg.addWidget(label("💻 Phần cứng", role="field"), 0, 0)
+        hg.addWidget(self.omni_hardware, 0, 1)
+        hg.setColumnStretch(1, 1)
+        eng.add(hg)
+        self.omni_install_btn = button("⬇   Cài đặt bộ máy", variant="violet", size="big", slot=self.omni_install)
+        eng.add(self.omni_install_btn)
+        self.omni_progress = QProgressBar()
+        self.omni_progress.hide()
+        eng.add(self.omni_progress)
+        er = QHBoxLayout()
+        self.omni_load_btn = button("🔥 Nạp model", tint="green", slot=self.omni_load,
+                                    tip="Khởi động bộ máy và nạp model sẵn (lần đầu sẽ tải model về máy) để lần đọc đầu tiên không phải chờ")
+        self.omni_stop_btn = button("⏹ Tắt bộ máy", tint="amber", slot=self.omni_stop,
+                                    tip="Giải phóng RAM/VRAM. Bộ máy tự bật lại khi cần")
+        self.omni_remove_btn = button("🗑 Gỡ", tint="red", slot=self.omni_uninstall,
+                                      tip="Xóa bộ máy và model đã tải để lấy lại dung lượng. Giọng đã lưu được giữ lại")
+        for b in (self.omni_load_btn, self.omni_stop_btn):
+            er.addWidget(b)
+        er.addStretch()
+        er.addWidget(self.omni_remove_btn)
+        eng.add(er)
+        left.addWidget(eng)
+
+        # ---- generation settings (same names as OmniVoice's generate())
+        gen = Card("🎛  Thông số tạo giọng", "blue", "Áp dụng cho mọi lần đọc bằng giọng OmniVoice. Tốc độ đọc chỉnh ở trang "
+                                                     "Đọc văn bản / Hàng loạt.")
+        gg = QGridLayout()
+        gg.setHorizontalSpacing(10)
+        gg.setVerticalSpacing(8)
+        spec = [
+            # key, label, kind, (min, max, step, decimals), tooltip
+            ("num_step", "Số bước", "int", (4, 64, 1, 0),
+             "Số bước giải mã (mặc định 32). 16 = nhanh gấp đôi, chất lượng giảm nhẹ; 64 = chậm, chi tiết hơn."),
+            ("guidance_scale", "CFG", "float", (0.0, 4.0, 0.1, 1),
+             "Guidance scale (mặc định 2.0): cao hơn = bám sát văn bản/giọng mẫu hơn, quá cao dễ cứng."),
+            ("duration", "Thời lượng (s)", "float", (0.0, 3600.0, 0.5, 1),
+             "Ép audio dài đúng số giây này (0 = tắt, dùng Tốc độ). Khi bật, Tốc độ bị bỏ qua và áp cho từng file."),
+            ("t_shift", "t_shift", "float", (0.01, 1.0, 0.01, 2), "Dịch lịch nhiễu (mặc định 0.1); nhỏ = nhấn các bước đầu."),
+            ("position_temperature", "Nhiệt vị trí", "float", (0.0, 20.0, 0.5, 1),
+             "position_temperature (mặc định 5.0): 0 = cố định, cao = ngẫu nhiên hơn khi chọn vị trí giải mã."),
+            ("class_temperature", "Nhiệt token", "float", (0.0, 2.0, 0.05, 2),
+             "class_temperature (mặc định 0 = cố định): cao hơn = giọng biến hoá, kém ổn định hơn."),
+            ("layer_penalty_factor", "Phạt lớp", "float", (0.0, 20.0, 0.5, 1),
+             "layer_penalty_factor (mặc định 5.0): ưu tiên giải mã các lớp codebook thấp trước."),
+            ("audio_chunk_duration", "Mỗi đoạn (s)", "float", (5.0, 60.0, 1.0, 0),
+             "audio_chunk_duration (mặc định 15): văn bản dài được chia thành các đoạn khoảng chừng này giây. "
+             "Giảm nếu thiếu VRAM."),
+            ("audio_chunk_threshold", "Chia từ (s)", "float", (5.0, 600.0, 5.0, 0),
+             "audio_chunk_threshold (mặc định 30): chỉ chia đoạn khi audio ước tính dài hơn ngưỡng này."),
+            ("pad_duration", "Đệm lặng (s)", "float", (0.0, 2.0, 0.05, 2),
+             "pad_duration (mặc định 0.1): khoảng lặng thêm vào đầu và cuối."),
+            ("fade_duration", "Fade (s)", "float", (0.0, 2.0, 0.05, 2), "fade_duration (mặc định 0.1): làm mềm đầu/cuối audio."),
+        ]
+        for i, (key, text, kind, (lo, hi, step, dec), tip) in enumerate(spec):
+            w = QSpinBox() if kind == "int" else QDoubleSpinBox()
+            w.setRange(lo, hi)
+            w.setSingleStep(step)
+            if kind != "int":
+                w.setDecimals(dec)
+            w.setToolTip(tip)
+            lb = label(text, role="field")
+            lb.setToolTip(tip)
+            gg.addWidget(lb, i // 2, (i % 2) * 2)
+            gg.addWidget(w, i // 2, (i % 2) * 2 + 1)
+            self.ov_fields[key] = w
+        gg.setColumnStretch(1, 1)
+        gg.setColumnStretch(3, 1)
+        gen.add(gg)
+        checks = [
+            ("denoise", "🔇 Khử nhiễu (denoise)", "Thêm token <|denoise|> để giọng sạch hơn (mặc định bật)."),
+            ("normalize_text", "🔢 Đọc số thành chữ", "normalize_text: 2345 → “hai nghìn ba trăm…”. Tiếng Việt và phần lớn "
+                                                    "ngôn ngữ dùng num2words; tiếng Anh/Trung cần WeTextProcessing."),
+            ("preprocess_prompt", "✂ Tự cắt lặng trong mẫu", "preprocess_prompt: bỏ khoảng lặng dài trong file mẫu khi clone, "
+                                                            "thêm dấu câu cuối lời thoại (mặc định bật)."),
+            ("postprocess_output", "🧹 Cắt lặng ở kết quả", "postprocess_output: bỏ khoảng lặng dài trong audio tạo ra "
+                                                            "(mặc định bật). Tắt nếu cần đúng tuyệt đối Thời lượng."),
+        ]
+        cg = QGridLayout()
+        cg.setHorizontalSpacing(10)
+        for i, (key, text, tip) in enumerate(checks):
+            c = QCheckBox(text)
+            c.setToolTip(tip)
+            cg.addWidget(c, i // 2, i % 2)
+            self.ov_fields[key] = c
+        gen.add(cg)
+        gr = QHBoxLayout()
+        gr.addWidget(button("↺ Về mặc định", size="small", tint="amber", slot=self._ov_reset))
+        gr.addStretch()
+        gen.add(gr)
+        left.addWidget(gen)
+        left.addStretch()
+        lw = QWidget()
+        lw.setLayout(left)
+        row.add(lw, 0, 470)
+
+        # ---- voice design
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(12)
+        des = Card("🎨  Thiết kế giọng (không cần file mẫu)", "pink",
+                   "Chọn vài thuộc tính rồi bấm Tạo thử. Mỗi lần bấm ra một giọng khác nhau — ưng giọng nào thì Lưu, app "
+                   "giữ đúng giọng đó để đọc hàng loạt. Để tất cả “Tự động” = model tự chọn giọng ngẫu nhiên (Auto Voice).")
+        dg = QGridLayout()
+        dg.setHorizontalSpacing(10)
+        dg.setVerticalSpacing(8)
+        self.design_combos: list[QComboBox] = []
+        for i, (key, text, options) in enumerate(omni.DESIGN):
+            c = QComboBox()
+            c.addItem("Tự động", "")
+            for value, vn in options:
+                c.addItem(vn if key not in ("dialect",) else f"{vn} ({value})", value)
+            if key == "accent":
+                c.setToolTip("Chỉ có tác dụng khi văn bản là tiếng Anh.")
+            if key == "dialect":
+                c.setToolTip("Chỉ có tác dụng khi văn bản là tiếng Trung.")
+            dg.addWidget(label(text, role="field"), i // 2 * 2, i % 2)
+            dg.addWidget(c, i // 2 * 2 + 1, i % 2)
+            self.design_combos.append(c)
+        dg.setColumnStretch(0, 1)
+        dg.setColumnStretch(1, 1)
+        des.add(dg)
+        lg = QGridLayout()
+        lg.setHorizontalSpacing(10)
+        lg.setVerticalSpacing(8)
+        self.design_lang = QComboBox()
+        for lbl, code in LANGUAGES["OmniVoice"]:
+            self.design_lang.addItem(lbl, code)
+        self.design_lang.setCurrentIndex(max(0, self.design_lang.findData("vi")))
+        self.design_lang.currentIndexChanged.connect(lambda _: self._design_lang_changed())
+        self.design_name = QLineEdit()
+        self.design_name.setPlaceholderText("Tên giọng khi lưu, ví dụ: Nữ trẻ giọng cao")
+        lg.addWidget(label("🌐 Ngôn ngữ", role="field"), 0, 0)
+        lg.addWidget(self.design_lang, 0, 1)
+        lg.addWidget(label("🏷 Tên giọng", role="field"), 1, 0)
+        lg.addWidget(self.design_name, 1, 1)
+        lg.setColumnStretch(1, 1)
+        des.add(lg)
+        des.add(label("Câu đọc thử (cũng là câu mẫu của giọng khi lưu)", role="muted"))
+        self.design_text = QTextEdit()
+        self.design_text.setAcceptRichText(False)
+        self.design_text.setFixedHeight(70)
+        self.design_text.setPlainText(DESIGN_TEXT["vi"])
+        des.add(self.design_text)
+        dr = QHBoxLayout()
+        dr.setSpacing(8)
+        self.design_btn = button("▶   Tạo thử giọng", variant="pink", size="big", slot=self.design_preview, min_w=200)
+        self.design_save_btn = button("💾 Lưu vào thư viện", tint="green", slot=self.design_save,
+                                      tip="Lưu đúng giọng vừa nghe thành một giọng dùng lại được")
+        self.design_play_btn = button("🔊 Nghe lại", tint="cyan", slot=lambda: self.open_path((self.design_last or {}).get("wav", "")))
+        self.design_save_btn.setEnabled(False)
+        self.design_play_btn.setEnabled(False)
+        dr.addWidget(self.design_btn)
+        dr.addWidget(self.design_save_btn)
+        dr.addWidget(self.design_play_btn)
+        dr.addStretch()
+        des.add(dr)
+        self.design_status = label("", role="hint", wrap=True)
+        des.add(self.design_status)
+        right.addWidget(des)
+
+        tips = Card("📚  Mẹo viết văn bản cho OmniVoice", "cyan")
+        tip_text = QLabel(
+            "<b>Tiếng động:</b> chèn thẻ vào câu, ví dụ <code>[laughter] Bạn làm tôi bất ngờ quá.</code> "
+            "Các thẻ: " + ", ".join(f"<code>{t}</code>" for t, _ in omni.NONVERBAL_TAGS) + ".<br>"
+            "<b>Sửa phát âm tiếng Anh:</b> viết âm CMU in hoa trong ngoặc vuông: "
+            "<code>He plays the [B EY1 S] guitar.</code><br>"
+            "<b>Sửa phát âm tiếng Trung:</b> viết pinyin in hoa kèm số thanh: <code>打ZHE2出售</code>.<br>"
+            "<b>Clone tốt nhất</b> khi mẫu 3–10 giây, cùng ngôn ngữ với văn bản; khác ngôn ngữ thì giọng sẽ mang âm sắc "
+            "của ngôn ngữ trong mẫu. Câu rất ngắn (1–2 giây) nên đọc bằng giọng đã lưu.")
+        tip_text.setWordWrap(True)
+        tip_text.setTextFormat(Qt.TextFormat.RichText)
+        tip_text.setProperty("role", "hint")
+        tip_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        tips.add(tip_text)
+        right.addWidget(tips)
+        right.addStretch()
+        rw = QWidget()
+        rw.setLayout(right)
+        row.add(rw, 1)
+        lay.addWidget(row)
+        lay.addStretch()
+        self._ov_load_fields()
+        for key, w in self.ov_fields.items():
+            sig = w.toggled if isinstance(w, QCheckBox) else w.valueChanged
+            sig.connect(lambda _v=None, k=key: self._ov_field_changed(k))
+        return page
+
+    def _ov_load_fields(self):
+        opts = omni.gen_options(self.config)
+        for key, w in self.ov_fields.items():
+            w.blockSignals(True)
+            if isinstance(w, QCheckBox):
+                w.setChecked(bool(opts[key]))
+            else:
+                w.setValue(opts[key])
+            w.blockSignals(False)
+
+    def _ov_field_changed(self, key: str):
+        w = self.ov_fields[key]
+        value = w.isChecked() if isinstance(w, QCheckBox) else w.value()
+        self.config = self.config_store.save({f"ov_{key}": value})
+
+    def _ov_reset(self):
+        self.config = self.config_store.save({f"ov_{k}": v for k, v in omni.ALL_DEFAULTS.items()})
+        self._ov_load_fields()
+        self.log("↺ Thông số OmniVoice đã về mặc định.")
+
+    def _omni_busy(self) -> bool:
+        return bool(self.omni_worker and self.omni_worker.isRunning())
+
+    def _refresh_omni(self):
+        """Engine status on the OmniVoice page, the Settings card and the header chip."""
+        reason = omni.unsupported_reason()
+        installed = omni.is_installed()
+        info = omni.install_info()
+        if reason:
+            status, detail = "❌ Máy này không chạy được OmniVoice", reason
+        elif installed:
+            run = (f"đang chạy trên {omni.ENGINE.device}" if omni.ENGINE.running() and omni.ENGINE.device
+                   else ("đang chạy" if omni.ENGINE.running() else "đang nghỉ (tự bật khi cần)"))
+            status = f"🟢 Đã cài • {run}"
+            bits = [f"OmniVoice {info.get('omnivoice', '?')}", f"PyTorch {info.get('torch', '?')}",
+                    info.get("gpu") or info.get("label", "")]
+            detail = "  •  ".join(b for b in bits if b) + f"\n📁 {omni.ROOT}"
+            if info.get("plan") == "cuda" and not info.get("cuda"):
+                detail += "\n⚠ PyTorch không thấy GPU NVIDIA — cập nhật driver rồi bấm Cài lại; hiện đang chạy bằng CPU."
+            if info.get("plan") == "cpu":
+                detail += "\n🐢 Đang dùng CPU: đọc chậm hơn GPU nhiều lần (1 phút audio có thể mất vài phút)."
+        else:
+            plan = omni.torch_plan(self.config.get("ov_hardware", "auto")) if hasattr(self, "omni_hardware") else {}
+            status = "⚪ Chưa cài bộ máy"
+            detail = (f"Bấm Cài đặt: app tự tải Python riêng, PyTorch ({plan.get('label', '')}) và OmniVoice vào "
+                      f"{omni.ROOT} — cần khoảng {plan.get('gb', 8)} GB trống và mạng ổn định; model tải thêm ở lần đọc đầu.")
+        if hasattr(self, "omni_status"):
+            busy = self._omni_busy()
+            self.omni_status.setText(status)
+            self.omni_detail.setText(detail)
+            if not busy:
+                self.omni_install_btn.setText("⬇   Cài lại bộ máy" if installed else "⬇   Cài đặt bộ máy")
+                self.omni_install_btn.setProperty("variant", None if installed else "violet")
+                self.omni_install_btn.setProperty("size", None if installed else "big")
+                st = self.omni_install_btn.style()
+                st.unpolish(self.omni_install_btn)
+                st.polish(self.omni_install_btn)
+                self.omni_install_btn.setEnabled(not reason)
+            self.omni_hardware.setEnabled(not busy and not reason and sys.platform != "darwin")
+            self.omni_load_btn.setEnabled(installed and not busy)
+            self.omni_stop_btn.setEnabled(omni.ENGINE.running() and not busy)
+            self.omni_remove_btn.setEnabled(installed and not busy and not omni.fake_mode())
+            self.design_btn.setEnabled(not busy)
+        if hasattr(self, "ov_settings_status"):
+            self.ov_settings_status.setText(status + ("" if installed or reason else " — cài ở trang 🌍 OmniVoice."))
+        if hasattr(self, "chip_omni"):
+            self.chip_omni.setText(("🟢" if installed else "⚪") + " OmniVoice")
+            self.chip_omni.setToolTip("Bộ máy OmniVoice đã cài — bấm để mở trang" if installed
+                                      else "Chưa cài bộ máy OmniVoice (miễn phí) — bấm để mở trang")
+
+    def omni_install(self):
+        if self._omni_busy():
+            self.omni_worker.cancel()
+            self.omni_install_btn.setEnabled(False)
+            self.log("⏹ Đang dừng cài đặt…")
+            return
+        if self._busy():
+            QMessageBox.warning(self, "Đang có tác vụ chạy", "Hãy chờ tác vụ đang chạy xong rồi cài bộ máy.")
+            return
+        hardware = self.omni_hardware.currentData() or "auto"
+        plan = omni.torch_plan(hardware)
+        if QMessageBox.question(
+                self, "Cài bộ máy OmniVoice",
+                f"App sẽ tải và cài vào máy:\n  • Python riêng cho OmniVoice\n  • PyTorch {omni.TORCH_VERSION} cho {plan['label']}\n"
+                f"  • OmniVoice {omni.OMNIVOICE_VERSION}\n\nCần khoảng {plan['gb']} GB trống và 5–30 phút tùy mạng. "
+                "Trong lúc cài vẫn dùng được giọng Inworld.\n\nBắt đầu cài?") != QMessageBox.StandardButton.Yes:
+            return
+        self.omni_install_btn.setText("⏹   Dừng cài đặt")
+        self.omni_progress.setRange(0, 100)
+        self.omni_progress.setValue(0)
+        self.omni_progress.show()
+
+        def job(log, cancelled, progress):
+            return omni.install(log, cancelled, progress, hardware)
+
+        def ok(info):
+            self.log(f"✅ Đã cài OmniVoice {info.get('omnivoice')} (PyTorch {info.get('torch')}, "
+                     f"{info.get('gpu') or info.get('label')}). Vào 🧬 Clone giọng hoặc thiết kế giọng để bắt đầu.")
+            QMessageBox.information(self, "Đã cài OmniVoice",
+                                    "✅ Bộ máy OmniVoice đã sẵn sàng.\n\nLần đọc đầu tiên sẽ tải model về máy (vài GB), "
+                                    "các lần sau chạy ngay.")
+
+        def bad(err):
+            self.log("❌ Cài OmniVoice không thành công: " + err)
+            if "Đã dừng" not in err:
+                QMessageBox.critical(self, "Cài OmniVoice thất bại", err[:1500])
+
+        def fin():
+            self.omni_progress.hide()
+            self.omni_worker = None
+            self._refresh_omni()
+
+        self.omni_worker = self._run(job, ok, bad, progress=self.omni_progress.setValue, finished=fin)
+        self._refresh_omni()
+
+    def omni_load(self):
+        if not self._provider_ready("OmniVoice") or self._omni_busy():
+            return
+        model = self._ov_model()
+        self.omni_progress.setRange(0, 0)
+        self.omni_progress.show()
+
+        def job(log, cancelled, progress):
+            return omni.ENGINE.request({"cmd": "load", "model": model}, log=log, cancel=cancelled)
+
+        def fin():
+            self.omni_progress.hide()
+            self.omni_progress.setRange(0, 100)
+            self.omni_worker = None
+            self._refresh_omni()
+
+        self.omni_worker = self._run(job, lambda _r: self.log(f"✅ OmniVoice đã nạp model {model}."),
+                                     lambda e: (self.log("❌ Nạp model OmniVoice lỗi: " + e),
+                                                "Đã dừng" in e or QMessageBox.critical(self, "Nạp model thất bại", e[:1500])),
+                                     finished=fin)
+        self._refresh_omni()
+
+    def omni_stop(self):
+        omni.ENGINE.stop()
+        self.log("⏹ Đã tắt bộ máy OmniVoice (tự bật lại khi cần).")
+        self._refresh_omni()
+
+    def omni_uninstall(self):
+        if self._busy():
+            QMessageBox.warning(self, "Đang có tác vụ chạy", "Hãy chờ tác vụ đang chạy xong rồi gỡ bộ máy.")
+            return
+        if QMessageBox.question(self, "Gỡ bộ máy OmniVoice",
+                                "Xóa bộ máy OmniVoice và các model đã tải để lấy lại dung lượng?\n\n"
+                                "Các giọng OmniVoice đã lưu được giữ lại và dùng tiếp được sau khi cài lại."
+                                ) != QMessageBox.StandardButton.Yes:
+            return
+
+        def fin():
+            self.omni_worker = None
+            self._refresh_omni()
+
+        self.omni_worker = self._run(lambda log, cancelled, progress: omni.uninstall(),
+                                     lambda _r: self.log("🗑 Đã gỡ bộ máy OmniVoice."),
+                                     lambda e: self.log("❌ Gỡ bộ máy lỗi: " + e), finished=fin)
+        self._refresh_omni()
+
+    # ---- voice design
+    def _design_lang_changed(self):
+        cur = self.design_text.toPlainText().strip()
+        if cur in DESIGN_TEXT.values() or not cur:
+            self.design_text.setPlainText(DESIGN_TEXT["en" if self.design_lang.currentData() == "en" else "vi"])
+
+    def _design_instruct(self) -> str:
+        return omni.build_instruct(c.currentData() for c in self.design_combos)
+
+    def design_preview(self):
+        if not self._provider_ready("OmniVoice"):
+            return
+        text = self.design_text.toPlainText().strip()
+        if not text:
+            QMessageBox.warning(self, "Thiếu câu đọc thử", "Hãy nhập câu đọc thử.")
+            return
+        instruct, lang, model = self._design_instruct(), self.design_lang.currentData() or "", self._ov_model()
+        problem = omni.check_instruct(instruct)
+        if problem:
+            QMessageBox.warning(self, "Thuộc tính giọng chưa hợp lệ", problem)
+            return
+        options = {**omni.gen_options(self.config), "duration": 0.0}
+        out = APP_DIR / "preview" / f"design_{datetime.now():%H%M%S}.wav"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cfg = dict(self.config)
+        self.design_btn.setEnabled(False)
+        self.design_btn.setText("⏳   Đang tạo…")
+        self.design_status.setText("")
+        self.log(f"🎨 Thiết kế giọng OmniVoice: {instruct or 'tự động (Auto Voice)'}…")
+
+        def job(log, cancelled, progress):
+            p = build_provider("OmniVoice", {}, cfg, log=log, cancel=cancelled)
+            return p.design(text, instruct, str(out), language=lang, model=model, options=options)
+
+        def ok(path):
+            self.design_last = {"wav": path, "text": text, "instruct": instruct, "language": lang}
+            self.design_save_btn.setEnabled(True)
+            self.design_play_btn.setEnabled(True)
+            self.design_status.setText(f"✅ Đã tạo giọng thử ({instruct or 'tự động'}). Ưng thì đặt tên và bấm 💾 Lưu; "
+                                       "chưa ưng thì bấm Tạo thử lần nữa.")
+            self.design_status.setStyleSheet(f"color:{STATUS_COLORS[self.mode]['ok']}")
+            self.log(f"✅ Giọng thử: {path}")
+            self.open_path(path)
+
+        def bad(err):
+            self.design_status.setText("❌ " + err)
+            self.design_status.setStyleSheet(f"color:{STATUS_COLORS[self.mode]['error']}")
+            self.log("❌ Thiết kế giọng lỗi: " + err)
+
+        def fin():
+            self.design_btn.setText("▶   Tạo thử giọng")
+            self.design_btn.setEnabled(True)
+            self._refresh_omni()
+
+        self._run(job, ok, bad, finished=fin)
+
+    def design_save(self):
+        d = self.design_last
+        if not d or not Path(d["wav"]).is_file():
+            return
+        name = self.design_name.text().strip() or ("Giọng thiết kế " + (d["instruct"] or "tự động"))[:60]
+        cfg, model = dict(self.config), self._ov_model()
+        self.design_save_btn.setEnabled(False)
+        self.log(f"💾 Đang lưu giọng thiết kế “{name}”…")
+
+        def job(log, cancelled, progress):
+            p = build_provider("OmniVoice", {}, cfg, log=log, cancel=cancelled)
+            return p.clone_voice(d["wav"], name, d["language"], ref_text=d["text"], model=model)
+
+        def ok(voice_id):
+            self._add_voice("OmniVoice", voice_id, name, d["language"],
+                            {"ov_kind": "design", "instruct": d["instruct"], "ref_text": d["text"]})
+            self.refresh_voices()
+            self.design_last = None
+            self.design_play_btn.setEnabled(False)
+            self.design_name.clear()
+            self.design_status.setText(f"✅ Đã lưu “{name}” vào thư viện — chọn nó ở trang Đọc văn bản / Hàng loạt.")
+            self.log(f"✅ Đã lưu giọng thiết kế: {name} → {voice_id}")
+            self.use_voice_id("OmniVoice", voice_id, switch=False)
+
+        def bad(err):
+            self.design_save_btn.setEnabled(True)
+            self.log("❌ Lưu giọng thiết kế lỗi: " + err)
+            QMessageBox.critical(self, "Lưu giọng thất bại", err[:1500])
+
+        self._run(job, ok, bad)
 
     # ================================================================ usage page
     def _page_usage(self):
@@ -1447,16 +2029,23 @@ class MainWindow(QMainWindow):
 
         return (
             "<div style='font-size:10.5pt;line-height:150%'>"
-            + step(1, c["amber"], "⚙ Nhập API key",
-                   "Vào <b>Cài đặt API</b>, dán key của Inworld và/hoặc MiniMax, bấm <b>🔌 Kiểm tra kết nối</b> rồi <b>💾 Lưu</b>.")
+            + step(1, c["amber"], "⚙ Chọn cách tạo giọng",
+                   "<b>🌍 OmniVoice (miễn phí):</b> mở trang <b>OmniVoice</b>, bấm <b>⬇ Cài đặt bộ máy</b> một lần "
+                   "(app tự tải Python, PyTorch và OmniVoice — vài GB; có card NVIDIA thì nhanh hơn nhiều). "
+                   "<b>🌊 Inworld (trả phí theo ký tự):</b> vào <b>Cài đặt API</b>, dán key, bấm "
+                   "<b>🔌 Kiểm tra kết nối</b> rồi <b>💾 Lưu</b>. Dùng cả hai cùng lúc cũng được.")
             + step(2, c["violet"], "🧬 Tạo giọng",
                    "Trang <b>Clone giọng</b>: chọn nhà cung cấp, chọn file mẫu (1 người nói, rõ, không nhạc), đặt tên, "
-                   "tích xác nhận quyền rồi bấm <b>Bắt đầu Clone</b>. Muốn xem giọng trên Inworld? Bấm <b>☁ Duyệt giọng Inworld</b> "
-                   "(lọc ngôn ngữ, giới tính, nghe thử, <b>Dùng ngay</b>) hoặc <b>🔄 Đồng bộ Inworld</b> để thêm mọi giọng bạn đã clone.")
+                   "tích xác nhận quyền rồi bấm <b>Bắt đầu Clone</b>. Với OmniVoice: mẫu 3–10 giây là đẹp nhất, nên chép "
+                   "đúng <b>lời thoại trong file mẫu</b> (hoặc bấm <b>📝 Tự chép lời</b>). Không có file mẫu? Trang "
+                   "<b>OmniVoice › 🎨 Thiết kế giọng</b>: chọn giới tính, độ tuổi, cao độ… bấm <b>Tạo thử</b>, ưng thì "
+                   "<b>💾 Lưu</b>. Giọng Inworld có sẵn: <b>☁ Duyệt giọng Inworld</b> hoặc <b>🔄 Đồng bộ Inworld</b>.")
             + step(3, c["blue"], "🗣 Đọc văn bản",
                    "Chọn giọng, dán nội dung, chọn <b>MP3</b>, <b>MP4</b> hoặc <b>Cả hai</b> rồi bấm <b>🔊 Tạo giọng đọc</b>. "
                    "Văn bản dài được tự chia đoạn và ghép liền mạch. Với Inworld có thêm <b>🎭 Delivery</b> (Ổn định / Cân bằng / "
-                   "Sáng tạo), <b>✨ khử nhiễu</b> và <b>💬 chỉ dẫn</b> phong cách đọc (model inworld-tts-2).")
+                   "Sáng tạo), <b>✨ khử nhiễu</b> và <b>💬 chỉ dẫn</b> phong cách đọc (model inworld-tts-2). "
+                   "Với OmniVoice có <b>➕ Chèn tiếng động</b> (cười, thở dài…) và <b>🎛 Thông số</b> (số bước, khử nhiễu, "
+                   "ép thời lượng, đọc số thành chữ…) ở trang OmniVoice.")
             + step(4, c["green"], "📊 Hàng loạt từ Excel",
                    "Dòng đầu là tiêu đề, ví dụ cột <b>filename</b> và <b>text</b> (bấm <b>📥 Tạo file Excel mẫu</b>). "
                    "Chọn cột, bấm <b>🚀 Chạy hàng loạt</b>. Bật <b>⏭ Bỏ qua dòng đã có file</b> để chạy tiếp khi bị ngắt; "
@@ -1471,8 +2060,13 @@ class MainWindow(QMainWindow):
               "Video = ảnh tĩnh + giọng đọc, chuẩn H.264/AAC phát được trên YouTube, Facebook, TikTok.</p>"
             + f"<p style='color:{c['teal']}'><b>🔄 Cập nhật:</b> ứng dụng tự kiểm tra bản mới khi mở. Có bản mới sẽ hiện nút "
               "<b>⬆ Có bản mới</b> trên thanh tiêu đề — bấm là tự tải, cài và mở lại. Dữ liệu, giọng và API key được giữ nguyên.</p>"
-            + f"<p style='color:{c['orange']}'><b>⚠ Lưu ý:</b> giọng clone của MiniMax sẽ bị xóa nếu 7 ngày không dùng — "
-              "hãy bấm <b>▶ Nghe thử</b> ngay sau khi clone. Chỉ clone giọng của bạn hoặc giọng đã được cho phép.</p>"
+            + f"<p style='color:{c['violet']}'><b>🌍 OmniVoice:</b> chạy hoàn toàn trên máy bạn nên không tốn phí và không "
+              "giới hạn ký tự; đổi lại cần ổ đĩa trống (khoảng 8–14 GB) và máy càng mạnh đọc càng nhanh. Lần đọc đầu tiên "
+              "phải tải model. Giọng OmniVoice chỉ nằm trên máy này. Muốn lấy lại dung lượng: trang OmniVoice › <b>🗑 Gỡ</b>.</p>"
+            + f"<p style='color:{c['blue']}'><b>🎨 Giao diện:</b> trang <b>Cài đặt API › Giao diện</b> có 2 kiểu: "
+              "<b>Cổ điển</b> (như trước) và <b>Youwee</b> (kính mờ, một màu nhấn, 6 chủ đề màu). Nút Sáng/Tối ở góc trên phải.</p>"
+            + f"<p style='color:{c['orange']}'><b>⚠ Lưu ý:</b> chỉ clone giọng của bạn hoặc giọng đã được người nói cho phép; "
+              "không dùng giọng clone để mạo danh hay lừa đảo.</p>"
             + f"<p style='color:{c['cyan']}'><b>🛟 Gặp lỗi?</b> Xem ô <b>Nhật ký</b> bên dưới, hoặc gửi file "
               f"<code>{html.escape(str(LOG_PATH))}</code> cho người hỗ trợ.</p></div>"
         )
@@ -1542,7 +2136,18 @@ class MainWindow(QMainWindow):
             arrows = make_arrow_icons(APP_DIR / "ui", mode)
         except Exception:
             arrows = {}
-        QApplication.instance().setStyleSheet(build_stylesheet(mode, arrows))
+        style, theme = self._ui_style(), self._ui_theme()
+        if style == "youwee":
+            load_fonts(resource_path("assets/fonts"))
+            cols = youwee_colors(mode, theme)
+            self.central.set_glow(cols["bg"], cols["gradient"])
+            self.app_title.set_gradient(cols["title"])
+        else:
+            self.central.set_glow(None)
+            self.app_title.set_gradient(None)
+        if hasattr(self, "ui_theme"):
+            self.ui_theme.setEnabled(style == "youwee")
+        QApplication.instance().setStyleSheet(build_stylesheet(mode, arrows, style, theme))
         self.theme_btn.setText("☀  Giao diện sáng" if mode == "dark" else "🌙  Giao diện tối")
         self.theme_btn.setToolTip("Chuyển giao diện Sáng / Tối")
         self.guide.setHtml(self._guide_html())
@@ -1565,9 +2170,6 @@ class MainWindow(QMainWindow):
     def _load_settings(self):
         c = self.config
         self.iw_key.setText(self.secret_store.get("inworld_api_key"))
-        self.mm_key.setText(self.secret_store.get("minimax_api_key"))
-        self.mm_group.setText(c.get("minimax_group_id", ""))
-        self.mm_base.setCurrentText(c.get("minimax_base_url", "https://api.minimax.io"))
         self.iw_base.setText(c.get("inworld_base_url", "https://api.inworld.ai"))
         out = c.get("last_output_dir") or str(Path.home() / "TTS_Output")
         self.tts_output_dir.setText(out)
@@ -1594,15 +2196,12 @@ class MainWindow(QMainWindow):
         self._update_video_color_btn()
 
     def save_settings(self):
-        ok1 = self.secret_store.set("minimax_api_key", self.mm_key.text())
-        ok2 = self.secret_store.set("inworld_api_key", self.iw_key.text())
+        saved = self.secret_store.set("inworld_api_key", self.iw_key.text())
         self.config = self.config_store.save({
-            "minimax_group_id": self.mm_group.text().strip(),
-            "minimax_base_url": self.mm_base.currentText().strip() or "https://api.minimax.io",
             "inworld_base_url": self.iw_base.text().strip() or "https://api.inworld.ai",
         })
         self._refresh_chips()
-        if ok1 and ok2:
+        if saved:
             self.log("✅ Đã lưu cài đặt và API key.")
             QMessageBox.information(self, "Đã lưu", "✅ Đã lưu cài đặt.\nAPI key được cất an toàn trong Windows Credential Manager.")
         else:
@@ -1612,15 +2211,10 @@ class MainWindow(QMainWindow):
                                 "API key chỉ được giữ đến khi đóng app.")
 
     def _secrets(self):
-        return {
-            "minimax_api_key": self.mm_key.text().strip() or self.secret_store.get("minimax_api_key"),
-            "inworld_api_key": self.iw_key.text().strip() or self.secret_store.get("inworld_api_key"),
-        }
+        return {"inworld_api_key": self.iw_key.text().strip() or self.secret_store.get("inworld_api_key")}
 
     def _live_config(self) -> dict:
         cfg = dict(self.config)
-        cfg["minimax_group_id"] = self.mm_group.text().strip()
-        cfg["minimax_base_url"] = self.mm_base.currentText().strip() or "https://api.minimax.io"
         cfg["inworld_base_url"] = self.iw_base.text().strip() or "https://api.inworld.ai"
         return cfg
 
@@ -1628,8 +2222,7 @@ class MainWindow(QMainWindow):
         s = self._secrets()
         self.chip_inworld.setText(("🟢" if s["inworld_api_key"] else "⚪") + " Inworld")
         self.chip_inworld.setToolTip("Đã có API key Inworld" if s["inworld_api_key"] else "Chưa có API key Inworld")
-        self.chip_minimax.setText(("🟢" if s["minimax_api_key"] else "⚪") + " MiniMax")
-        self.chip_minimax.setToolTip("Đã có API key MiniMax" if s["minimax_api_key"] else "Chưa có API key MiniMax")
+        self._refresh_omni()
         ff = find_ffmpeg()
         self.chip_ffmpeg.setText(("🟢" if ff else "🔴") + " ffmpeg")
         self.chip_ffmpeg.setToolTip(ff or "Không tìm thấy ffmpeg — không tạo được MP4")
@@ -1640,9 +2233,8 @@ class MainWindow(QMainWindow):
                 self.ffmpeg_label.setText("❌ Không tìm thấy ffmpeg. Chạy lại install.bat (tự cài imageio-ffmpeg) "
                                           "hoặc chép ffmpeg.exe vào cùng thư mục với ứng dụng.")
 
-    def test_connection(self, provider: str):
-        out = self.iw_test_result if provider == "Inworld" else self.mm_test_result
-        btn = self.iw_test if provider == "Inworld" else self.mm_test
+    def test_connection(self, provider: str = "Inworld"):
+        out, btn = self.iw_test_result, self.iw_test
         out.setText("⏳ Đang kết nối…")
         btn.setEnabled(False)
         secrets, cfg = self._secrets(), self._live_config()
@@ -1735,7 +2327,7 @@ class MainWindow(QMainWindow):
                 if c == 1:
                     acc = ACCENTS[PROVIDER_ACCENT.get(prov, "blue")]
                     it.setForeground(QColor(acc[1] if self.mode == "dark" else acc[2]))
-                    it.setText(("🌊 " if prov == "Inworld" else "🌸 ") + prov)
+                    it.setText(f"{PROVIDER_ICON.get(prov, '❔')} {prov}")
                     f = it.font()
                     f.setBold(True)
                     it.setFont(f)
@@ -1750,9 +2342,9 @@ class MainWindow(QMainWindow):
             combo.blockSignals(True)
             combo.clear()
             if not voices:
-                combo.addItem("— Chưa có giọng, hãy Clone hoặc lấy từ tài khoản —", None)
+                combo.addItem("— Chưa có giọng: hãy Clone, thiết kế hoặc lấy từ tài khoản —", None)
             for v in voices:
-                icon = "🌊" if v.get("provider") == "Inworld" else "🌸"
+                icon = PROVIDER_ICON.get(v.get("provider"), "❔")
                 combo.addItem(f"{icon}  {v.get('local_name')}   ·   {v.get('provider')}", v.get("uid"))
             idx = combo.findData(current) if current else -1
             combo.setCurrentIndex(idx if idx >= 0 else 0)
@@ -1775,17 +2367,27 @@ class MainWindow(QMainWindow):
         prov = voice.get("provider", "Inworld")
         model_combo.setEnabled(True)
         speed.setEnabled(True)
-        model_combo.addItems(MODELS.get(prov, []))
+        models = MODELS.get(prov, [])
+        model_combo.addItems(models)
         saved = self.config.get(f"model_{prov}")
-        for m in (prev_model, saved):
-            if m and m in MODELS.get(prov, []):
-                model_combo.setCurrentText(m)
-                break
+        pick = next((m for m in (prev_model, saved) if m and m in models), None)
+        if not pick and prov == "OmniVoice" and saved:
+            pick = saved                      # a checkpoint folder / another repo typed by the user
+        if pick:
+            model_combo.setCurrentText(pick)
         lo, hi = SPEED_RANGE.get(prov, (0.5, 2.0))
         speed.setRange(lo, hi)
         speed.setValue(float(self.config.get(f"speed_{prov}", 1.0)))
-        info.setText(f"🌐 {language_label(prov, voice.get('language'))}   •   ⚡ tốc độ {lo}–{hi}×")
-        info.setToolTip("Voice ID: " + voice.get("provider_voice_id", ""))
+        free = "   •   🆓 miễn phí" if prov == "OmniVoice" else ""
+        info.setText(f"🌐 {language_label(prov, voice.get('language'))}   •   ⚡ tốc độ {lo}–{hi}×{free}")
+        tip = "Voice ID: " + voice.get("provider_voice_id", "")
+        if voice.get("instruct"):
+            tip += "\nInstruct: " + voice["instruct"]
+        if voice.get("ref_text"):
+            tip += "\nLời thoại mẫu: " + voice["ref_text"][:200]
+        info.setToolTip(tip)
+        model_combo.setToolTip("Tên model trên HuggingFace hoặc đường dẫn thư mục checkpoint trên máy."
+                               if prov == "OmniVoice" else "")
         self._sync_iw_options("tts" if combo is self.tts_voice else "batch")
 
     def _voice_from_combo(self, combo):
@@ -1830,12 +2432,15 @@ class MainWindow(QMainWindow):
         v = self._selected_voice()
         if not v:
             return
+        local = v.get("provider") == "OmniVoice"
+        note = ("Giọng OmniVoice chỉ nằm trên máy này nên sẽ bị xóa hẳn, không lấy lại được." if local else
+                "Giọng trên tài khoản Inworld KHÔNG bị xóa, có thể lấy lại bằng ☁ Duyệt giọng Inworld.")
         if QMessageBox.question(
-            self, "Xóa giọng",
-            f"Xóa “{v.get('local_name')}” khỏi thư viện trong app?\n\n"
-            "Giọng trên tài khoản nhà cung cấp KHÔNG bị xóa, có thể lấy lại bằng ☁ Lấy từ tài khoản.",
+            self, "Xóa giọng", f"Xóa “{v.get('local_name')}” khỏi thư viện trong app?\n\n{note}",
         ) == QMessageBox.StandardButton.Yes:
             self.voice_store.remove(v["uid"])
+            if local:
+                omni.delete_voice(v.get("provider_voice_id", ""))
             self.refresh_voices()
             self.log(f"🗑 Đã xóa khỏi thư viện: {v.get('local_name')}")
 
@@ -1865,9 +2470,7 @@ class MainWindow(QMainWindow):
         from dialogs import ImportVoicesDialog
 
         secrets = self._secrets()
-        if not secrets["inworld_api_key" if provider == "Inworld" else "minimax_api_key"]:
-            self.go(PAGE_SETTINGS)
-            QMessageBox.warning(self, "Thiếu API key", f"Hãy nhập API key {provider} ở trang Cài đặt trước.")
+        if not self._provider_ready(provider):
             return
         existing = {v.get("provider_voice_id") for v in self.voice_store.list() if v.get("provider") == provider}
 
@@ -1879,8 +2482,7 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             added = 0
             for v in dlg.selected():
-                if self._add_voice(provider, v["voice_id"], v["name"], self._import_lang(provider, v),
-                                   {"imported": True}):
+                if self._add_voice(provider, v["voice_id"], v["name"], v.get("language", ""), {"imported": True}):
                     added += 1
             self.refresh_voices()
             if added:
@@ -1888,11 +2490,7 @@ class MainWindow(QMainWindow):
             if dlg.use_now:
                 self.use_voice_id(provider, dlg.use_now["voice_id"])
 
-    @staticmethod
-    def _import_lang(provider: str, v: dict) -> str:
-        return v.get("language", "") if provider == "Inworld" else "auto"
-
-    def use_voice_id(self, provider: str, voice_id: str):
+    def use_voice_id(self, provider: str, voice_id: str, switch: bool = True):
         """Select a library voice (by provider id) on the TTS and batch pages."""
         uid = next((v["uid"] for v in self.voice_store.list()
                     if v.get("provider") == provider and v.get("provider_voice_id") == voice_id), None)
@@ -1904,7 +2502,7 @@ class MainWindow(QMainWindow):
                 combo.setCurrentIndex(idx)
         name = self.voice_store.get(uid).get("local_name", voice_id)
         self.log(f"🎤 Đã chọn giọng: {name}")
-        if self.stack.currentIndex() not in (PAGE_TTS, PAGE_BATCH):
+        if switch and self.stack.currentIndex() not in (PAGE_TTS, PAGE_BATCH):
             self.go(PAGE_TTS)
 
     def sync_inworld_voices(self, silent: bool = False):
@@ -1953,15 +2551,25 @@ class MainWindow(QMainWindow):
                             f"{safe_filename(v.get('local_name', 'voice'))}_{v['uid'][:6]}")
 
     def _preview_voice(self, prov: str, voice_id: str, name: str, language: str, stem: str):
+        if not self._provider_ready(prov):
+            return
         lang = (language or "").lower()
         text = PREVIEW_TEXT["en"] if lang.startswith("en") or lang == "english" else PREVIEW_TEXT["vi"]
         out = APP_DIR / "preview" / f"{safe_filename(stem)}.mp3"
         out.parent.mkdir(parents=True, exist_ok=True)
         secrets, cfg = self._secrets(), self._live_config()
-        model = self.config.get(f"model_{prov}") or MODELS[prov][0]
-        if model not in MODELS[prov]:
-            model = MODELS[prov][0]
-        options = {k: self.config.get(f"iw_{k}") for k in ("delivery", "enhance", "instruction")} if prov == "Inworld" else {}
+        if prov == "OmniVoice":
+            model = self._ov_model()
+            voice = next((v for v in self.voice_store.list() if v.get("provider") == prov
+                          and v.get("provider_voice_id") == voice_id), None)
+            options = {**self._ov_options(voice), "duration": 0.0}
+            if lang not in ("", "vi", "en"):
+                language = ""                 # the preview sentence is Vietnamese: let the model detect it
+        else:
+            model = self.config.get(f"model_{prov}") or MODELS[prov][0]
+            if model not in MODELS[prov]:
+                model = MODELS[prov][0]
+            options = {k: self.config.get(f"iw_{k}") for k in ("delivery", "enhance", "instruction")}
         self.log(f"▶ Đang tạo câu nghe thử cho “{name}” ({model})…")
 
         def job(log, cancelled, progress):
@@ -1983,11 +2591,14 @@ class MainWindow(QMainWindow):
         self.clone_language.clear()
         for lbl, code in LANGUAGES[provider]:
             self.clone_language.addItem(lbl, code)
-        default = "vi-VN" if provider == "Inworld" else "Vietnamese"
+        default = "vi-VN" if provider == "Inworld" else "vi"
         idx = self.clone_language.findData(default)
         if idx >= 0:
             self.clone_language.setCurrentIndex(idx)
         self.clone_rules.setText("ℹ " + sample_hint(provider))
+        local = provider == "OmniVoice"
+        self.clone_ov_box.setVisible(local)
+        self.clone_denoise.setVisible(not local)
         if self.clone_sample.text().strip():
             self._validate_sample()
 
@@ -2003,7 +2614,7 @@ class MainWindow(QMainWindow):
         return ok
 
     def _browse_clone_sample(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Chọn file giọng mẫu", "", "Audio (*.wav *.mp3 *.m4a *.webm)")
+        path, _ = QFileDialog.getOpenFileName(self, "Chọn file giọng mẫu", "", "Audio (*.wav *.mp3 *.m4a *.flac *.ogg *.webm)")
         if path:
             self.clone_sample.setText(path)
             if not self.clone_name.text().strip():
@@ -2030,13 +2641,19 @@ class MainWindow(QMainWindow):
                                 "Bạn cần tích ô xác nhận có quyền sử dụng giọng mẫu trước khi clone.")
             return
         secrets = self._secrets()
-        if not secrets["inworld_api_key" if provider == "Inworld" else "minimax_api_key"]:
-            self.go(PAGE_SETTINGS)
-            QMessageBox.warning(self, "Thiếu API key", f"Hãy nhập API key {provider} ở trang Cài đặt.")
+        if not self._provider_ready(provider):
             return
         self.config = self.config_store.save({"last_provider": provider})
         cfg = self._live_config()
         denoise = self.clone_denoise.isChecked()
+        local = provider == "OmniVoice"
+        ref_text = self.clone_ref_text.toPlainText().strip() if local else ""
+        instruct = self.clone_instruct.text().strip() if local else ""
+        if omni.check_instruct(instruct):
+            QMessageBox.warning(self, "Instruct chưa hợp lệ", omni.check_instruct(instruct))
+            self.clone_instruct.setFocus()
+            return
+        ov_model = self._ov_model()
         self.clone_button.setEnabled(False)
         self.clone_button.setText("⏳   Đang clone… (có thể mất 10–60 giây)")
         self.clone_busy.show()
@@ -2044,21 +2661,24 @@ class MainWindow(QMainWindow):
 
         def job(log, cancelled, progress):
             p = build_provider(provider, secrets, cfg, log=log, cancel=cancelled)
-            return p.clone_voice(sample, name, lang, denoise=denoise)
+            if local:
+                vid = p.clone_voice(sample, name, lang, ref_text=ref_text, model=ov_model)
+                return vid, {"ov_kind": "clone", "instruct": instruct, "ref_text": p.last_ref_text}
+            return p.clone_voice(sample, name, lang, denoise=denoise), {}
 
-        def ok(voice_id):
+        def ok(res):
+            voice_id, extra = res
             self._add_voice(provider, voice_id, name, lang, {
                 "sample_file": Path(sample).name,
-                "consent_confirmed_at": datetime.now().isoformat(timespec="seconds")})
+                "consent_confirmed_at": datetime.now().isoformat(timespec="seconds"), **extra})
             self.refresh_voices()
             for combo in (self.tts_voice, self.batch_voice):
                 combo.setCurrentIndex(max(0, combo.count() - 1))
             self.voice_table.selectRow(self.voice_table.rowCount() - 1)
             self.log(f"✅ Clone thành công: {name} → {voice_id}")
-            extra = ("\n\n⚠ MiniMax sẽ xóa giọng clone nếu 7 ngày không dùng — nên nghe thử ngay."
-                     if provider == "MiniMax" else "")
+            note = (f"\nLời thoại mẫu: {extra['ref_text'][:160]}" if extra.get("ref_text") else "")
             if QMessageBox.question(self, "🎉 Clone thành công",
-                                    f"Đã tạo giọng “{name}”.\nVoice ID: {voice_id}{extra}\n\nNghe thử giọng ngay bây giờ?"
+                                    f"Đã tạo giọng “{name}”.\nVoice ID: {voice_id}{note}\n\nNghe thử giọng ngay bây giờ?"
                                     ) == QMessageBox.StandardButton.Yes:
                 self.preview_selected_voice()
 
@@ -2073,15 +2693,38 @@ class MainWindow(QMainWindow):
 
         self.clone_worker = self._run(job, ok, bad, finished=fin)
 
+    def transcribe_sample(self):
+        """OmniVoice: let Whisper write the transcript of the sample so the user can check it."""
+        sample = self.clone_sample.text().strip().strip('"')
+        if not sample or not Path(sample).is_file():
+            QMessageBox.warning(self, "Thiếu file mẫu", "Hãy chọn file giọng mẫu (bước ②) trước.")
+            return
+        if not self._provider_ready("OmniVoice"):
+            return
+        cfg, model = dict(self.config), self._ov_model()
+        self.clone_transcribe.setEnabled(False)
+        self.log("📝 Đang chép lời thoại của file mẫu (lần đầu phải tải model Whisper ~1,6 GB)…")
+
+        def job(log, cancelled, progress):
+            return build_provider("OmniVoice", {}, cfg, log=log, cancel=cancelled).transcribe(sample, model=model)
+
+        def ok(text):
+            self.clone_ref_text.setPlainText(text)
+            self.log("✅ Đã chép lời thoại — hãy đọc lại và sửa nếu máy nghe sai.")
+
+        self._run(job, ok, lambda e: (self.log("❌ Chép lời thoại lỗi: " + e),
+                                      "Đã dừng" in e or QMessageBox.critical(self, "Chép lời thoại thất bại", e[:1500])),
+                  finished=lambda: self.clone_transcribe.setEnabled(True))
+
     # ================================================================ tts
     def _update_counter(self):
         text = self.tts_text.toPlainText()
         n = len(text.strip())
         voice = self._voice_from_combo(self.tts_voice) if hasattr(self, "tts_voice") else None
-        limit = 1800 if not voice or voice.get("provider") == "Inworld" else 5000
+        limit = 500 if voice and voice.get("provider") == "OmniVoice" else 1800
         parts = len(split_text(text, limit)) if n else 0
         secs = n / 14.0
-        line = (f"🔤 {n:,} ký tự   •   🧩 {parts} đoạn gửi API   •   ⏱ ước tính ~{fmt_duration(secs)}"
+        line = (f"🔤 {n:,} ký tự   •   🧩 {parts} đoạn   •   ⏱ ước tính ~{fmt_duration(secs)}"
                 .replace(",", "."))
         if voice and voice.get("provider") == "Inworld" and hasattr(self, "tts_usage"):
             model = self.tts_model.currentText().strip() or MODELS["Inworld"][0]
@@ -2098,6 +2741,10 @@ class MainWindow(QMainWindow):
                                        f"({usage.fmt_int(su['chars_after'])} ký tự)  •  "
                                        "đồng bộ số dư ở 📈 Mức dùng để xem % còn lại")
             self.tts_usage.show()
+        elif voice and voice.get("provider") == "OmniVoice" and hasattr(self, "tts_usage"):
+            self.tts_usage.setText("🆓 OmniVoice: miễn phí • " + (f"bộ máy {omni.ENGINE.device}" if omni.ENGINE.device
+                                                               else "bộ máy tự bật ở lần đọc đầu"))
+            self.tts_usage.show()
         elif hasattr(self, "tts_usage"):
             self.tts_usage.hide()
         self.tts_counter.setText(line)
@@ -2106,6 +2753,13 @@ class MainWindow(QMainWindow):
     def _opts_text(options: dict) -> str:
         if not options:
             return ""
+        if "num_step" in options:              # OmniVoice
+            out = f", {options['num_step']} bước"
+            if float(options.get("duration") or 0) > 0:
+                out += f", ép {options['duration']:g}s"
+            if options.get("instruct"):
+                out += f", instruct “{options['instruct'][:40]}”"
+            return out
         label_of = {code: text.split(" ", 1)[-1] for code, text, _t in DELIVERY}
         out = f", {label_of.get(options.get('delivery') or 'BALANCED', 'Cân bằng')}"
         if options.get("enhance"):
@@ -2157,9 +2811,7 @@ class MainWindow(QMainWindow):
             return
         prov = voice["provider"]
         secrets = self._secrets()
-        if not secrets["inworld_api_key" if prov == "Inworld" else "minimax_api_key"]:
-            self.go(PAGE_SETTINGS)
-            QMessageBox.warning(self, "Thiếu API key", f"Hãy nhập API key {prov} ở trang Cài đặt.")
+        if not self._provider_ready(prov):
             return
         stem = self.tts_filename.text().strip() or f"tts_{datetime.now():%Y%m%d_%H%M%S}"
         stem = unique_stem(outdir, stem, exts_for(fmt))
@@ -2168,8 +2820,8 @@ class MainWindow(QMainWindow):
         self.config = self.config_store.save({"last_output_dir": outdir, f"model_{prov}": model,
                                               f"speed_{prov}": speed})
         cfg, video = self._live_config(), self._video_settings()
-        options = self._iw_options("tts") if prov == "Inworld" else {}
-        if options:
+        options = self._iw_options("tts") if prov == "Inworld" else self._ov_options(voice)
+        if prov == "Inworld":
             self._save_iw_options("tts")
             if model not in INSTRUCTION_MODELS:
                 options["instruction"] = ""
@@ -2537,9 +3189,7 @@ class MainWindow(QMainWindow):
             return
         prov = voice["provider"]
         secrets = self._secrets()
-        if not secrets["inworld_api_key" if prov == "Inworld" else "minimax_api_key"]:
-            self.go(PAGE_SETTINGS)
-            QMessageBox.warning(self, "Thiếu API key", f"Hãy nhập API key {prov} ở trang Cài đặt.")
+        if not self._provider_ready(prov):
             return
         model = self.batch_model.currentText().strip() or MODELS[prov][0]
         speed = self.batch_speed.value()
@@ -2548,8 +3198,8 @@ class MainWindow(QMainWindow):
             "batch_skip_existing": self.batch_skip.isChecked(), "batch_merge_all": self.batch_merge.isChecked(),
             f"model_{prov}": model, f"speed_{prov}": speed, "batch_rows": self.batch_rows.text().strip(),
         })
-        options = self._iw_options("batch") if prov == "Inworld" else {}
-        if options:
+        options = self._iw_options("batch") if prov == "Inworld" else self._ov_options(voice)
+        if prov == "Inworld":
             self._save_iw_options("batch")
             if model not in INSTRUCTION_MODELS:
                 options["instruction"] = ""
@@ -2758,7 +3408,7 @@ class MainWindow(QMainWindow):
         for r in self.responsive:
             r.update_for(avail)
         room = self.chip_box.width() - 10
-        for c in (self.chip_usage, self.chip_ffmpeg, self.chip_minimax, self.chip_inworld, self.chip_voices):
+        for c in (self.chip_usage, self.chip_ffmpeg, self.chip_omni, self.chip_inworld, self.chip_voices):
             if c is self.chip_usage and not getattr(self, "_usage_chip_on", False):
                 c.hide()
                 continue
@@ -2793,6 +3443,7 @@ class MainWindow(QMainWindow):
                 w.cancel()
             for w in running:
                 w.wait(8000)
+        omni.ENGINE.stop()
         try:
             self.config_store.save({"window_geometry": bytes(self.saveGeometry().toBase64()).decode("ascii")})
         except Exception:

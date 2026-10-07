@@ -1,4 +1,9 @@
-TTS Clone Studio 2.3.0
+TTS Clone Studio 3.0.0
+
+3.0.0
+- OmniVoice (mien phi, chay tren may): cai bo may trong app, clone giong, thiet ke giong, thong so sinh giong, 600+ ngon ngu
+- Bo nha cung cap MiniMax, chi con Inworld + OmniVoice
+- Hai kieu giao dien: Co dien / Youwee (6 chu de mau, sang/toi)
 
 2.3.0
 - Trang Muc dung Inworld: bieu do theo ngay/gio, theo model, 24h/7/30/90 ngay
