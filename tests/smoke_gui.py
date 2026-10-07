@@ -400,6 +400,7 @@ w.tts_voice.setCurrentIndex(w.tts_voice.findData("u2")); pump()
 w.tts_format.buttons["mp3"].click()
 PAGES = ["clone", "tts", "batch", "video", "omni", "settings", "usage", "update", "guide"]
 overflow = []
+checked = {}
 def widest(root, n=6):
     """The widgets that force a page wider than the window: biggest minimum widths first."""
     from PyQt6.QtWidgets import QWidget
@@ -420,20 +421,22 @@ for style in ("classic", "youwee"):
             w.go(i)
             if n == "video": w._update_video_preview()
             sa = w.stack.widget(i).findChild(main.QScrollArea)
-            if sa.horizontalScrollBar().maximum():
+            fm = w.status_label.fontMetrics()                  # the font this style really got
+            real_fonts = fm.horizontalAdvance("i" * 20) < 0.7 * fm.horizontalAdvance("M" * 20)
+            checked[style] = real_fonts
+            if sa.horizontalScrollBar().maximum() and real_fonts:
                 overflow.append(f"{style}/{mode}/{n}: +{sa.horizontalScrollBar().maximum()}px, viewport "
                                 f"{sa.viewport().width()} | widest: {widest(sa.widget())}")
             shot(f"{style}_{mode}_{i}_{n}")
 # The width check needs real text metrics. Qt's "offscreen" platform on Windows has no system fonts:
-# every character is drawn as a same-width box about twice as wide as real text (the 3.0.0 build showed
-# all 18 pages "overflowing", old ones included), so the check only means something where "i" is narrower than "M".
-from PyQt6.QtGui import QFontInfo, QFontMetrics
-fm = QFontMetrics(app.font())
-real_fonts = fm.horizontalAdvance("i" * 20) < 0.7 * fm.horizontalAdvance("M" * 20)
-print(f"font metrics: i x20 = {fm.horizontalAdvance('i' * 20)}px, M x20 = {fm.horizontalAdvance('M' * 20)}px, "
-      f"overflowing pages: {len(overflow)}, width check {'on' if real_fonts else 'SKIPPED (no proportional font)'}")
-if overflow and real_fonts:      # a page that needs a horizontal scrollbar at this window size is a layout bug
-    fi = QFontInfo(app.font())
+# without one, every character is a same-width box about twice as wide as real text and every page
+# "overflows". So a style is only checked where its font has "i" narrower than "M" - everywhere on
+# Linux/macOS, and for the Youwee style (which brings its own Nunito font) on Windows too.
+print("page width check per style (False = skipped, no proportional font here):", checked)
+assert checked.get("youwee"), checked
+if overflow:      # a page that needs a horizontal scrollbar at this window size is a layout bug
+    from PyQt6.QtGui import QFontInfo
+    fi, fm = QFontInfo(w.status_label.font()), w.status_label.fontMetrics()
     raise AssertionError(" || ".join(overflow[:3]) + f" || {len(overflow)} page(s) wider than the {W}x{H} window; "
                          f"font {fi.family()} {fi.pixelSize()}px, i/M {fm.horizontalAdvance('i' * 20)}/{fm.horizontalAdvance('M' * 20)}, "
                          f"{w.logicalDpiX()} dpi, stack {w.stack.width()}px")
