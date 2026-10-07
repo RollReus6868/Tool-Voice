@@ -20,6 +20,12 @@ from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 import main  # noqa: E402
 import updater  # noqa: E402
 from test_updater import FakeGitHub  # noqa: E402
+import ci_annotations  # noqa: E402
+import traceback  # noqa: E402
+
+_default_hook = sys.excepthook
+sys.excepthook = lambda t, e, tb: (ci_annotations.annotate("update_gui_test", "".join(traceback.format_exception(t, e, tb))),
+                                   _default_hook(t, e, tb))
 
 QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
 QMessageBox.information = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Ok)

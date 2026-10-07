@@ -129,4 +129,14 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    try:
+        run()
+    except BaseException:
+        import sys
+        import traceback
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "tests"))
+        import ci_annotations
+
+        ci_annotations.annotate("self_test", traceback.format_exc())
+        raise

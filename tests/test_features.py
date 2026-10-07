@@ -8,6 +8,11 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import ci_annotations  # noqa: E402
+
+ci_annotations.install()
 
 import providers  # noqa: E402
 import usage  # noqa: E402

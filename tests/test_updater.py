@@ -17,6 +17,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))
+
+import ci_annotations  # noqa: E402
+
+ci_annotations.install()
 
 import updater  # noqa: E402
 from app_info import APP_ID, APP_VERSION  # noqa: E402

@@ -10,9 +10,13 @@ tmp = Path(tempfile.mkdtemp()); os.environ["APPDATA"] = str(tmp / "appdata")
 os.environ["TTS_NO_UPDATE_CHECK"] = "1"
 os.environ["INWORLD_API_KEY"] = "fake"
 os.environ["TTS_OMNI_FAKE"] = "1"      # OmniVoice engine = engine/omni_server.py writing tones (no torch needed)
-sys.path.insert(0, str(APP))
+sys.path.insert(0, str(APP)); sys.path.insert(0, str(APP / "tests"))
+import ci_annotations
 errors = []
-sys.excepthook = lambda t, e, tb: (errors.append("".join(traceback.format_exception(t, e, tb))), print("EXC:", "".join(traceback.format_exception(t, e, tb))[-1500:]))
+def _hook(t, e, tb):
+    text = "".join(traceback.format_exception(t, e, tb))
+    errors.append(text); print("EXC:", text[-1500:]); ci_annotations.annotate("smoke_gui", text)
+sys.excepthook = _hook
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import QTimer
@@ -416,5 +420,5 @@ assert "Nunito" not in app.styleSheet()
 w.close(); pump()
 assert not omni.ENGINE.running()
 print("errors:", len(errors))
-for e in errors: print(e[:600])
+for e in errors: print(e[:600]); ci_annotations.annotate("smoke_gui", e)
 sys.exit(1 if errors else 0)
