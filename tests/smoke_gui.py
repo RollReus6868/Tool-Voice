@@ -420,6 +420,7 @@ for style in ("classic", "youwee"):
         for i, n in enumerate(PAGES):
             w.go(i)
             if n == "video": w._update_video_preview()
+            pump(3)       # a page is laid out again only once it is shown: without this the scrollbar is stale
             sa = w.stack.widget(i).findChild(main.QScrollArea)
             fm = w.status_label.fontMetrics()                  # the font this style really got
             real_fonts = fm.horizontalAdvance("i" * 20) < 0.7 * fm.horizontalAdvance("M" * 20)
