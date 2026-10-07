@@ -424,11 +424,19 @@ for style in ("classic", "youwee"):
                 overflow.append(f"{style}/{mode}/{n}: +{sa.horizontalScrollBar().maximum()}px, viewport "
                                 f"{sa.viewport().width()} | widest: {widest(sa.widget())}")
             shot(f"{style}_{mode}_{i}_{n}")
-if overflow:      # a page that needs a horizontal scrollbar at this window size is a layout bug
-    from PyQt6.QtGui import QFontInfo
+# The width check needs real text metrics. Qt's "offscreen" platform on Windows has no system fonts:
+# every character is drawn as a same-width box about twice as wide as real text (the 3.0.0 build showed
+# all 18 pages "overflowing", old ones included), so the check only means something where "i" is narrower than "M".
+from PyQt6.QtGui import QFontInfo, QFontMetrics
+fm = QFontMetrics(app.font())
+real_fonts = fm.horizontalAdvance("i" * 20) < 0.7 * fm.horizontalAdvance("M" * 20)
+print(f"font metrics: i x20 = {fm.horizontalAdvance('i' * 20)}px, M x20 = {fm.horizontalAdvance('M' * 20)}px, "
+      f"overflowing pages: {len(overflow)}, width check {'on' if real_fonts else 'SKIPPED (no proportional font)'}")
+if overflow and real_fonts:      # a page that needs a horizontal scrollbar at this window size is a layout bug
     fi = QFontInfo(app.font())
     raise AssertionError(" || ".join(overflow[:3]) + f" || {len(overflow)} page(s) wider than the {W}x{H} window; "
-                         f"font {fi.family()} {fi.pixelSize()}px, {w.logicalDpiX()} dpi, stack {w.stack.width()}px")
+                         f"font {fi.family()} {fi.pixelSize()}px, i/M {fm.horizontalAdvance('i' * 20)}/{fm.horizontalAdvance('M' * 20)}, "
+                         f"{w.logicalDpiX()} dpi, stack {w.stack.width()}px")
 assert w.ui_theme.isEnabled() and "Nunito" in app.styleSheet()
 w.ui_theme.set_value("sunset", emit=True); pump()
 assert storage.ConfigStore().load()["ui_theme"] == "sunset" and main.youwee_colors("light", "sunset")["primary"] in app.styleSheet()
