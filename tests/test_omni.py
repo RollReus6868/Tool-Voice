@@ -459,6 +459,72 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(text, "lời thoại do máy chép")
 
 
+class PauseTests(unittest.TestCase):
+    """Khoảng nghỉ giữa câu."""
+    O = {**omni.PAUSE_DEFAULTS, "pause_enabled": True}
+
+    def tearDown(self):
+        omni.ENGINE.stop()
+
+    def test_split_only_at_marks_inside_the_text(self):
+        sp = omni.split_pauses
+        self.assertEqual(sp("Gold. pearls, silk; spice... wine! wheat? cattle.", self.O),
+                         [("Gold.", 0.5), ("pearls,", 0.25), ("silk;", 0.35), ("spice...", 0.7), ("wine!", 0.5),
+                          ("wheat?", 0.5), ("cattle.", 0.0)])                   # no pause after the last mark
+        self.assertEqual(sp("Không có dấu câu ở giữa.", self.O), [("Không có dấu câu ở giữa.", 0.0)])
+        self.assertEqual(sp("Xin chào… các bạn!! ", self.O), [("Xin chào…", 0.7), ("các bạn!!", 0.0)])
+        self.assertEqual(sp('Anh ấy nói: "đi thôi." Rồi đi', self.O),
+                         [("Anh ấy nói:", 0.35), ('"đi thôi."', 0.5), ("Rồi đi", 0.0)])
+        # numbers, abbreviations and initials do not cut
+        self.assertEqual(sp("Dr. Smith paid 1,000.50 in the U.S. Army, J. K. Rowling left.", self.O),
+                         [("Dr. Smith paid 1,000.50 in the U.S. Army,", 0.25), ("J. K. Rowling left.", 0.0)])
+        # a mark set to 0 s does not cut
+        self.assertEqual(sp("Một, hai. Ba", {**self.O, "pause_comma": 0}), [("Một, hai.", 0.5), ("Ba", 0.0)])
+        self.assertEqual(sp(". , !", self.O), [])
+
+    def test_options_are_typed_and_stay_out_of_the_engine_config(self):
+        o = omni.gen_options({"ov_pause_enabled": 1, "ov_pause_comma": "0.4", "ov_pause_period": None})
+        self.assertEqual((o["pause_enabled"], o["pause_comma"], o["pause_period"]), (True, 0.4, 0.5))
+        req = omni.tts_request("a", "x.wav", options=o)
+        self.assertFalse([k for k in [*req, *req["config"]] if k.startswith("pause")])
+
+    def _run(self, text, options):
+        p = providers.OmniVoiceProvider({})
+        vid = p.clone_voice(tone(TMP / "pause.wav", 3), "Nghỉ", "en", ref_text="hello")
+        seen, real = [], omni.ENGINE.request
+
+        def spy(req, **kw):
+            seen.append(dict(req))
+            return real(req, **kw)
+
+        out = str(TMP / "pause_out.mp3")
+        with mock.patch.object(omni.ENGINE, "request", spy):
+            p.synthesize(text, vid, out, options={**omni.gen_options({}), **options})
+        omni.delete_voice(vid)
+        return [r for r in seen if r["cmd"] == "tts"], probe_duration(out), p.chars_used
+
+    def test_one_request_per_piece_and_exact_silence(self):
+        reqs, seconds, chars = self._run("Gold. pearls, silk", {**self.O, "pad_duration": 0.1})
+        self.assertEqual([r["text"] for r in reqs], ["Gold.", "pearls,", "silk"])
+        self.assertTrue(all(r["config"]["pad_duration"] == 0.0 for r in reqs))   # the app pads, not the engine
+        # fake engine: 0.4 s per short piece; + 0.5 after "." + 0.25 after "," + 0.1 at each end
+        self.assertAlmostEqual(seconds, 3 * 0.4 + 0.5 + 0.25 + 0.2, delta=0.08)
+        self.assertEqual(chars, len("Gold.pearls,silk"))
+
+    def test_off_fixed_duration_or_nothing_to_cut_is_one_request(self):
+        text = "Gold. pearls, silk"
+        self.assertEqual(len(self._run(text, {"pause_enabled": False})[0]), 1)
+        reqs, seconds, _ = self._run(text, {**self.O, "duration": 2.0})
+        self.assertEqual((len(reqs), round(seconds)), (1, 2))
+        self.assertEqual(len(self._run("Không có dấu câu ở giữa.", self.O)[0]), 1)
+
+    def test_long_piece_is_still_split_and_pauses_only_after_its_mark(self):
+        long = "x" * 700 + ","
+        reqs, seconds, _ = self._run(long + " end", {**self.O, "pad_duration": 0.0})
+        self.assertEqual([len(r["text"]) for r in reqs], [500, 201, 3])
+        self.assertAlmostEqual(seconds, 3.0 + 3.0 + 0.4 + 0.25, delta=0.08)
+
+
 class StorageTests(unittest.TestCase):
     def test_minimax_voices_are_dropped_with_a_backup(self):
         folder = TMP / "store"

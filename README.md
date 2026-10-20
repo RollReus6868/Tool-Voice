@@ -1,4 +1,4 @@
-# 🎙 TTS Clone Studio 3.0
+# 🎙 TTS Clone Studio 3.1
 
 Ứng dụng **Windows & macOS**: **clone giọng nói → đọc văn bản → xuất MP3 / MP4**, chạy lẻ hoặc hàng loạt từ file Excel.
 Hai cách tạo giọng: **Inworld** (API chính thức, trả phí theo ký tự) và **OmniVoice** (miễn phí, chạy ngay trên máy bạn, 600+ ngôn ngữ). **Tự cập nhật** qua GitHub Releases.
@@ -54,7 +54,7 @@ Lần đầu mở, Windows SmartScreen có thể báo *Unknown publisher* → b�
 | 2 | 🧬 **Clone giọng** | Chọn nhà cung cấp, chọn file giọng mẫu, đặt tên, tích xác nhận quyền → **Bắt đầu Clone**. Hoặc **☁ Duyệt giọng Inworld** (lọc, nghe thử, dùng ngay) / **🔄 Đồng bộ Inworld** / **🎨 Thiết kế giọng OmniVoice** (không cần file mẫu) |
 | 3 | 🗣 **Đọc văn bản** | Chọn giọng, dán nội dung, chọn **MP3 / MP4 / Cả hai** → **🔊 Tạo giọng đọc** |
 | – | 🎭 **Delivery (Inworld)** | Ổn định / Cân bằng / Sáng tạo, ✨ khử nhiễu, 💬 chỉ dẫn phong cách (model inworld-tts-2). Model mặc định: `inworld-tts-2-flash` |
-| – | 🌍 **OmniVoice** | Cài/gỡ bộ máy, 🎨 thiết kế giọng (giới tính, độ tuổi, cao độ, thì thầm, giọng tiếng Anh, phương ngữ Trung), 🎛 thông số (số bước, CFG, khử nhiễu, ép thời lượng, đọc số thành chữ…). Ở trang Đọc văn bản có **➕ Chèn tiếng động** (`[laughter]`, `[sigh]`…) |
+| – | 🌍 **OmniVoice** | Cài/gỡ bộ máy, 🎨 thiết kế giọng (giới tính, độ tuổi, cao độ, thì thầm, giọng tiếng Anh, phương ngữ Trung), 🎛 thông số (số bước, CFG, khử nhiễu, ép thời lượng, đọc số thành chữ…), ⏸ khoảng nghỉ giữa câu (số giây nghỉ riêng cho dấu phẩy, chấm phẩy, dấu chấm, ba chấm). Ở trang Đọc văn bản có **➕ Chèn tiếng động** (`[laughter]`, `[sigh]`…) |
 | 4 | 📊 **Hàng loạt Excel** | Chọn file `.xlsx`, chọn cột nội dung và cột tên file → **🚀 Chạy hàng loạt** |
 | – | 📈 **Mức dùng** | Trang riêng giống trang Usage của Inworld (24 giờ/7/30/90 ngày, theo model, biểu đồ, bảng). Bấm 🔄 **Đồng bộ với Inworld**, chép số dư ở Billing và số ký tự ở Usage → app lấy làm mốc và tự cộng các lần đọc sau đó |
 | – | 🎬 **Video MP4** | Chọn ảnh nền, màu nền, khung hình (16:9, 9:16 Shorts/TikTok, 1:1) |
@@ -90,6 +90,7 @@ Mẫu tốt: 1 người nói, rõ, không nhạc nền, không vang. Chỉ clone
 - **Cài**: trang 🌍 OmniVoice → **⬇ Cài đặt bộ máy**. App tải trình cài `uv` (từ PyPI, kiểm mã SHA-256), một Python riêng, PyTorch và OmniVoice vào `…/TTSCloneStudio/omni/`. Cần khoảng 8 GB trống (CPU / Mac) hoặc 14 GB (GPU NVIDIA), 5–30 phút tùy mạng. Lần đọc đầu tiên tải thêm model từ HuggingFace.
 - **Phần cứng**: card NVIDIA → bản CUDA 12.8 (nhanh); Mac chip Apple → GPU của máy; còn lại → CPU (chậm). Mac chip Intel không hỗ trợ.
 - **Gỡ**: nút **🗑 Gỡ** xóa bộ máy và model, giữ lại các giọng đã lưu. Gỡ cài đặt app trên Windows cũng xóa bộ máy.
+- **Khoảng nghỉ giữa câu**: model tự đọc liền các câu ngắn. Bật **⏸ Khoảng nghỉ giữa câu** ở trang OmniVoice: app đọc từng cụm và chèn đúng số giây lặng đã đặt sau mỗi dấu câu nằm giữa đoạn (cuối đoạn không thêm). Đặt 0 cho dấu nào thì không ngắt ở dấu đó. Không áp dụng khi đã đặt Thời lượng.
 - **Model khác**: ô **Model** ở trang Đọc văn bản nhận tên kho HuggingFace hoặc đường dẫn thư mục checkpoint trên máy.
 - OmniVoice do nhóm k2-fsa (Xiaomi) phát triển, giấy phép Apache-2.0: https://github.com/k2-fsa/OmniVoice — phần huấn luyện/đánh giá model của dự án không nằm trong app này.
 

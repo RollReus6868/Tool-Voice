@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import os
+import shutil
 import tempfile
 import time
+import wave
 from pathlib import Path
 from typing import Callable
 
@@ -327,13 +329,6 @@ class OmniVoiceProvider(BaseProvider):
         req["model"] = (model or "").strip() or omni.DEFAULT_MODEL
         return omni.ENGINE.request(req, log=self.log, cancel=self.cancel)
 
-    def _wav_request(self, req: dict, model: str) -> bytes:
-        with tempfile.TemporaryDirectory(prefix="tts_omni_") as td:
-            wav, mp3 = str(Path(td) / "a.wav"), str(Path(td) / "a.mp3")
-            self._ask({**req, "out": wav}, model)
-            wav_to_mp3(wav, mp3)
-            return Path(mp3).read_bytes()
-
     def clone_voice(self, sample_path, display_name, language="", denoise=False, ref_text: str = "",
                     model: str = "") -> str:
         """Encode the sample once into a reusable prompt. Empty ref_text = Whisper writes it."""
@@ -367,22 +362,78 @@ class OmniVoiceProvider(BaseProvider):
         return output_wav
 
     def synthesize(self, text, voice_id, output_path, *, model="", speed=1.0, language="", options=None) -> str:
+        o = options or {}
         # a fixed duration applies to one request, so the text must not be split by the app then
-        self.max_chars = 10 ** 9 if float((options or {}).get("duration") or 0) > 0 else type(self).max_chars
+        fixed = float(o.get("duration") or 0) > 0
+        self.max_chars = 10 ** 9 if fixed else type(self).max_chars
+        pieces = omni.split_pauses(text, o) if o.get("pause_enabled") and not fixed else []
+        if len(pieces) > 1:
+            return self._synthesize_paused(pieces, voice_id, output_path, model=model, speed=speed,
+                                           language=language, options=o)
         return super().synthesize(text, voice_id, output_path, model=model, speed=speed, language=language,
                                   options=options)
 
-    def synth_chunk(self, text, voice_id, *, model, speed, language, options=None) -> bytes:
+    def _synthesize_paused(self, pieces, voice_id, output_path, *, model, speed, language, options) -> str:
+        """Khoảng nghỉ giữa câu: one request per piece, then exactly the chosen silence after each piece.
+        The engine pads nothing; the user's pad_duration goes once at the start and once at the end."""
+        pad = max(0.0, float(options.get("pad_duration", omni.GEN_DEFAULTS["pad_duration"]) or 0))
+        opts = {**options, "pad_duration": 0.0}
+        segs = [(chunk, pause if i == len(chunks) - 1 else 0.0)
+                for piece, pause in pieces for chunks in [split_text(piece, self.max_chars)]
+                for i, chunk in enumerate(chunks)]
+        self.log(f"   ⏸ {self.name}: {len(segs)} cụm, nghỉ theo dấu câu")
+        with tempfile.TemporaryDirectory(prefix="tts_pause_") as td:
+            joined = str(Path(td) / "all.wav")
+            out = None
+            try:
+                for index, (chunk, pause) in enumerate(segs, 1):
+                    self._check_cancel()
+                    self.log(f"   ↳ {self.name}: cụm {index}/{len(segs)} — {chunk[:40]}"
+                             + (f" ⏸ {pause:g}s" if pause else ""))
+                    wav = str(Path(td) / f"p{index:04d}.wav")
+                    self._tts_wav(chunk, voice_id, wav, model=model, speed=speed, language=language, options=opts)
+                    with wave.open(wav, "rb") as src:
+                        params, frames = src.getparams(), src.readframes(src.getnframes())
+                    if out is None:
+                        out = wave.open(joined, "wb")
+                        out.setparams(params)
+                        first = params
+                        out.writeframes(_silence(first, pad))
+                    elif params[:3] != first[:3]:
+                        raise ProviderError("Bộ máy trả về các đoạn audio khác định dạng — không ghép được.")
+                    out.writeframes(frames + _silence(first, pause))
+                out.writeframes(_silence(first, pad))
+            finally:
+                if out is not None:
+                    out.close()
+            mp3 = str(Path(td) / "all.mp3")
+            wav_to_mp3(joined, mp3)
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(mp3, output_path)
+        return output_path
+
+    def _tts_wav(self, text, voice_id, wav, *, model, speed, language, options=None) -> None:
         prompt = omni.voice_prompt(voice_id)
         if not prompt.is_file():
             raise ProviderError("Không tìm thấy dữ liệu của giọng OmniVoice này trên máy (đã bị xoá hoặc được tạo ở "
                                 "máy khác) — hãy clone/thiết kế lại giọng.")
         lo, hi = SPEED_RANGE["OmniVoice"]
-        req = omni.tts_request(text, "", language=language, prompt=str(prompt),
-                               speed=max(lo, min(hi, float(speed or 1.0))), options=options)
-        audio = self._wav_request(req, model)
+        self._ask(omni.tts_request(text, wav, language=language, prompt=str(prompt),
+                                   speed=max(lo, min(hi, float(speed or 1.0))), options=options), model)
         self.chars_used += len(text)
-        return audio
+
+    def synth_chunk(self, text, voice_id, *, model, speed, language, options=None) -> bytes:
+        with tempfile.TemporaryDirectory(prefix="tts_omni_") as td:
+            wav, mp3 = str(Path(td) / "a.wav"), str(Path(td) / "a.mp3")
+            self._tts_wav(text, voice_id, wav, model=model, speed=speed, language=language, options=options)
+            wav_to_mp3(wav, mp3)
+            return Path(mp3).read_bytes()
+
+
+def _silence(params, seconds: float) -> bytes:
+    """`seconds` of digital silence in the WAV format `params` (signed PCM; 8-bit WAV is unsigned)."""
+    n = int(round(params.framerate * max(0.0, seconds))) * params.nchannels
+    return (b"\x80" if params.sampwidth == 1 else b"\0" * params.sampwidth) * n
 
 
 # ---------------------------------------------------------------- factory

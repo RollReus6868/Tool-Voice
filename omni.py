@@ -155,8 +155,50 @@ GEN_DEFAULTS = {
     "preprocess_prompt": True, "postprocess_output": True, "pad_duration": 0.1, "fade_duration": 0.1,
     "audio_chunk_duration": 15.0, "audio_chunk_threshold": 30.0,
 }
-EXTRA_DEFAULTS = {"duration": 0.0, "normalize_text": False}      # generate() arguments, not config fields
+PAUSE_DEFAULTS = {          # "Khoảng nghỉ giữa câu" (app side, seconds of silence after each mark)
+    "pause_enabled": False, "pause_comma": 0.25, "pause_semicolon": 0.35, "pause_period": 0.5,
+    "pause_ellipsis": 0.7,
+}
+EXTRA_DEFAULTS = {"duration": 0.0, "normalize_text": False, **PAUSE_DEFAULTS}   # not generation-config fields
 ALL_DEFAULTS = {**GEN_DEFAULTS, **EXTRA_DEFAULTS}
+
+# a run of marks followed by optional closing quotes/brackets, then a space or the end of the text
+_PAUSE_MARK = re.compile(r"(\.{3,}|…|[.,;:!?]+)[\"'”’)\]»]*(?=\s|$)")
+_ABBREV = {"mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "vs", "etc", "no", "rev", "gen", "gov", "tp", "ths",
+           "ts", "pgs", "gs", "bs", "ks", "q", "p"}
+
+
+def pause_kind(mark: str) -> str:
+    if "…" in mark or "..." in mark:
+        return "ellipsis"
+    if set(mark) & set(".!?"):
+        return "period"
+    return "semicolon" if set(mark) & set(";:") else "comma"
+
+
+def split_pauses(text: str, options: dict) -> list[tuple[str, float]]:
+    """Cut the text after the punctuation marks that sit INSIDE it -> [(piece, silence after it)].
+    The last piece gets 0 (no pause at the very end). A mark whose pause is 0 does not cut; neither do
+    "Dr.", "U.S.", "J." (abbreviations, initials) or marks inside "1,000" / "3.5" (no space after)."""
+    out: list[tuple[str, float]] = []
+    start = 0
+    for m in _PAUSE_MARK.finditer(text):
+        mark = m.group(1)
+        word = text[start:m.start()].split()[-1:] or [""]
+        if mark == "." and (word[0].lower() in _ABBREV or "." in word[0] or len(word[0]) == 1):
+            continue
+        seconds = float(options.get(f"pause_{pause_kind(mark)}") or 0)
+        piece = text[start:m.end()].strip()
+        if seconds <= 0 or not any(ch.isalnum() for ch in piece):
+            continue
+        out.append((piece, seconds))
+        start = m.end()
+    rest = text[start:].strip()
+    if any(ch.isalnum() for ch in rest):
+        out.append((rest, 0.0))
+    elif out:                                  # only marks left over: glue them to the last piece
+        out[-1] = ((out[-1][0] + " " + rest).strip(), 0.0)
+    return out
 
 
 def gen_options(config: dict) -> dict:

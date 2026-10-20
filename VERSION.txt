@@ -1,4 +1,7 @@
-TTS Clone Studio 3.0.0
+TTS Clone Studio 3.1.0
+
+3.1.0
+- OmniVoice: Khoang nghi giua cau - so giay nghi rieng cho dau phay, cham phay/hai cham, dau cham/hoi/than, ba cham (chi dau cau nam giua doan)
 
 3.0.0
 - OmniVoice (mien phi, chay tren may): cai bo may trong app, clone giong, thiet ke giong, thong so sinh giong, 600+ ngon ngu

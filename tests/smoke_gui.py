@@ -334,6 +334,17 @@ tts = [r for r in REQS if r["cmd"] == "tts"]
 assert len(tts) == 1 and tts[0]["duration"] == 2.0 and "speed" not in tts[0], tts
 assert 1.7 < media.probe_duration(str(out / "omni_2s.mp3")) < 2.4
 w.ov_fields["duration"].setValue(0.0); pump()
+# 3.1 Khoảng nghỉ giữa câu: one request per piece, the chosen silence after each mark inside the text
+w.ov_fields["pause_enabled"].setChecked(True); w.ov_fields["pause_period"].setValue(0.8); pump()
+cfg = omni.gen_options(storage.ConfigStore().load())
+assert (cfg["pause_enabled"], cfg["pause_period"], cfg["pause_comma"]) == (True, 0.8, 0.25), cfg
+w.tts_text.setPlainText("Gold. pearls, silk."); w.tts_speed.setValue(1.0); w.tts_filename.setText("omni_pause"); REQS.clear()
+w.start_tts(); wait_workers(60)
+tts = [r for r in REQS if r["cmd"] == "tts"]
+assert [r["text"] for r in tts] == ["Gold.", "pearls,", "silk."] and tts[0]["config"]["pad_duration"] == 0.0, tts
+# fake engine: 0.4 s per piece + 0.8 after "." + 0.25 after "," + 0.1 padding at each end
+assert abs(media.probe_duration(str(out / "omni_pause.mp3")) - (1.2 + 0.8 + 0.25 + 0.2)) < 0.1
+w.ov_fields["pause_enabled"].setChecked(False); pump()
 # voice design: preview, then keep exactly that voice
 w.go(main.PAGE_OMNI); pump(); REQS.clear()
 w.design_combos[0].setCurrentIndex(w.design_combos[0].findData("female"))
@@ -392,8 +403,11 @@ assert not w._provider_ready("OmniVoice") and w.stack.currentIndex() == main.PAG
 assert len(errors) == n_err + 1 and "Chưa cài OmniVoice" in errors[-1], errors[n_err:]
 del errors[n_err:]
 os.environ["TTS_OMNI_FAKE"] = "1"; w._refresh_omni(); pump()
-w.ov_fields["num_step"].setValue(8); w._ov_reset(); pump()
+w.ov_fields["num_step"].setValue(8); w.ov_fields["pause_comma"].setValue(1.0); w._ov_reset(); pump()
 assert w.ov_fields["num_step"].value() == 32 and w.ov_fields["denoise"].isChecked() and not w.ov_fields["normalize_text"].isChecked()
+assert w.ov_fields["pause_comma"].value() == 1.0                      # each card resets only its own settings
+w._ov_reset(pause=True); pump()
+assert w.ov_fields["pause_comma"].value() == 0.25 and w.ov_fields["pause_period"].value() == 0.5
 
 # ================= 3.0: two looks (classic / Youwee), both modes, every page
 w.tts_voice.setCurrentIndex(w.tts_voice.findData("u2")); pump()

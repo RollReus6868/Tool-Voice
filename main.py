@@ -1160,6 +1160,39 @@ class MainWindow(QMainWindow):
         gr.addStretch()
         gen.add(gr)
         left.addWidget(gen)
+
+        # ---- Khoảng nghỉ giữa câu (app side: one request per piece + silence after its mark)
+        pau = Card("⏸  Khoảng nghỉ giữa câu", "teal",
+                   "Model tự đọc liền các câu ngắn (“Gold. pearls. silk.”). Bật mục này để app đọc từng cụm rồi chèn "
+                   "đúng chừng ấy giây lặng sau mỗi dấu câu NẰM GIỮA đoạn — cuối đoạn không thêm. Đặt 0 = không ngắt "
+                   "ở dấu đó. Đoạn có nhiều dấu câu sẽ đọc lâu hơn (mỗi cụm là một lần tạo).")
+        c = QCheckBox("⏸ Bật khoảng nghỉ theo dấu câu")
+        c.setToolTip("Không áp dụng khi đặt Thời lượng (s) > 0.")
+        self.ov_fields["pause_enabled"] = c
+        pau.add(c)
+        pg = QGridLayout()
+        pg.setHorizontalSpacing(10)
+        pg.setVerticalSpacing(8)
+        marks = [("pause_comma", "Dấu phẩy  ,"), ("pause_semicolon", "Chấm phẩy, hai chấm  ; :"),
+                 ("pause_period", "Dấu chấm, hỏi, than  . ? !"), ("pause_ellipsis", "Ba chấm  … ...")]
+        for i, (key, text) in enumerate(marks):
+            w = QDoubleSpinBox()
+            w.setRange(0.0, 5.0)
+            w.setSingleStep(0.05)
+            w.setDecimals(2)
+            w.setSuffix(" giây")
+            w.setToolTip(f"Mặc định {omni.PAUSE_DEFAULTS[key]:g} giây. 0 = không ngắt ở dấu này. Khi bật “Cắt lặng ở "
+                         "kết quả”, mỗi cụm còn giữ tối đa ~0,1 giây lặng tự nhiên ở hai đầu, cộng thêm vào số này.")
+            pg.addWidget(label(text, role="field"), i, 0)
+            pg.addWidget(w, i, 1)
+            self.ov_fields[key] = w
+        pg.setColumnStretch(1, 1)
+        pau.add(pg)
+        pr = QHBoxLayout()
+        pr.addWidget(button("↺ Về mặc định", size="small", tint="amber", slot=lambda: self._ov_reset(pause=True)))
+        pr.addStretch()
+        pau.add(pr)
+        left.addWidget(pau)
         left.addStretch()
         lw = QWidget()
         lw.setLayout(left)
@@ -1272,10 +1305,12 @@ class MainWindow(QMainWindow):
         value = w.isChecked() if isinstance(w, QCheckBox) else w.value()
         self.config = self.config_store.save({f"ov_{key}": value})
 
-    def _ov_reset(self):
-        self.config = self.config_store.save({f"ov_{k}": v for k, v in omni.ALL_DEFAULTS.items()})
+    def _ov_reset(self, pause: bool = False):
+        """Each card resets only its own settings."""
+        self.config = self.config_store.save({f"ov_{k}": v for k, v in omni.ALL_DEFAULTS.items()
+                                              if (k in omni.PAUSE_DEFAULTS) == pause})
         self._ov_load_fields()
-        self.log("↺ Thông số OmniVoice đã về mặc định.")
+        self.log("↺ Khoảng nghỉ giữa câu đã về mặc định." if pause else "↺ Thông số OmniVoice đã về mặc định.")
 
     def _omni_busy(self) -> bool:
         return bool(self.omni_worker and self.omni_worker.isRunning())
@@ -2045,7 +2080,7 @@ class MainWindow(QMainWindow):
                    "Văn bản dài được tự chia đoạn và ghép liền mạch. Với Inworld có thêm <b>🎭 Delivery</b> (Ổn định / Cân bằng / "
                    "Sáng tạo), <b>✨ khử nhiễu</b> và <b>💬 chỉ dẫn</b> phong cách đọc (model inworld-tts-2). "
                    "Với OmniVoice có <b>➕ Chèn tiếng động</b> (cười, thở dài…) và <b>🎛 Thông số</b> (số bước, khử nhiễu, "
-                   "ép thời lượng, đọc số thành chữ…) ở trang OmniVoice.")
+                   "ép thời lượng, đọc số thành chữ…) ở trang OmniVoice. Câu ngắn bị đọc liền (“Gold. pearls. silk.”)? Bật <b>⏸ Khoảng nghỉ giữa câu</b> ở trang OmniVoice và đặt số giây nghỉ cho dấu phẩy, dấu chấm….")
             + step(4, c["green"], "📊 Hàng loạt từ Excel",
                    "Dòng đầu là tiêu đề, ví dụ cột <b>filename</b> và <b>text</b> (bấm <b>📥 Tạo file Excel mẫu</b>). "
                    "Chọn cột, bấm <b>🚀 Chạy hàng loạt</b>. Bật <b>⏭ Bỏ qua dòng đã có file</b> để chạy tiếp khi bị ngắt; "
@@ -2757,6 +2792,8 @@ class MainWindow(QMainWindow):
             out = f", {options['num_step']} bước"
             if float(options.get("duration") or 0) > 0:
                 out += f", ép {options['duration']:g}s"
+            elif options.get("pause_enabled"):
+                out += f", nghỉ “,” {options['pause_comma']:g}s “.” {options['pause_period']:g}s"
             if options.get("instruct"):
                 out += f", instruct “{options['instruct'][:40]}”"
             return out
