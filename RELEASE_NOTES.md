@@ -16,7 +16,5 @@
 |---|---|
 | Windows (khuyên dùng) | `TTSCloneStudio-3.1.1-windows-setup.exe` |
 | Windows, không muốn cài | `TTSCloneStudio-3.1.1-windows-portable.exe` |
-| Mac chip Apple (M1–M4) | `TTSCloneStudio-3.1.1-mac-arm64.zip` |
-| Mac chip Intel | `TTSCloneStudio-3.1.1-mac-x64.zip` |
 
-Đang dùng bản 2.1 trở lên thì không cần tải: app sẽ hiện nút **⬆ Có bản mới** và tự cài.
+Bản 3.1.1 **chỉ có Windows**; máy Mac tiếp tục dùng 3.1.0 (bản Mac sẽ có ở lần phát hành sau). Windows đang dùng bản 2.1 trở lên thì không cần tải: app sẽ hiện nút **⬆ Có bản mới** và tự cài.
