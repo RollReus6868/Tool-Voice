@@ -6,5 +6,5 @@ APP_VERSION, so bump it here (only here) for every release.
 
 APP_NAME = "TTS Clone Studio"
 APP_ID = "TTSCloneStudio"          # file / asset prefix, no spaces
-APP_VERSION = "3.1.0"
+APP_VERSION = "3.1.1"
 GITHUB_REPO = "RollReus6868/Tool-Voice"   # "owner/repo" — repo must be Public for updates

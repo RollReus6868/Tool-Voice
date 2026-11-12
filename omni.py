@@ -19,6 +19,7 @@ import atexit
 import functools
 import hashlib
 import json
+import math
 import os
 import platform
 import queue
@@ -29,7 +30,9 @@ import sys
 import threading
 import time
 import uuid
+import wave
 import zipfile
+from array import array
 from collections import deque
 from pathlib import Path
 from typing import Callable
@@ -257,6 +260,58 @@ def delete_voice(voice_id: str) -> None:
             _voice_file(voice_id, ext).unlink(missing_ok=True)
         except (OSError, ProviderError):
             pass
+
+
+# ---------------------------------------------------------------- sample cut mid-speech
+# A sample that stops while the speaker is still talking makes the model say the missing end of the
+# reference ("…a exten|" -> "ten de") at the start of EVERY generation. Frames of 20 ms, levels in dB
+# relative to the loudest frame.
+_FRAME = 0.02
+
+
+def _frame_levels(wav_path) -> tuple:
+    with wave.open(str(wav_path), "rb") as w:
+        params, raw = w.getparams(), w.readframes(w.getnframes())
+    if params.sampwidth != 2:
+        raise ValueError("cần WAV 16-bit")
+    samples = array("h", raw)
+    if sys.byteorder == "big":
+        samples.byteswap()
+    hop = max(1, int(params.framerate * _FRAME)) * params.nchannels
+    levels = []
+    for i in range(0, len(samples) - hop + 1, hop):
+        frame = samples[i:i + hop]
+        levels.append(10 * math.log10(sum(v * v for v in frame) / hop / 32768 ** 2 + 1e-12))
+    return levels, params
+
+
+def speech_at_end(wav_path) -> bool:
+    """True when the last 100 ms is still speech (within 30 dB of the loudest part)."""
+    levels, _ = _frame_levels(wav_path)
+    return len(levels) > 5 and max(levels[-5:]) > max(levels) - 30
+
+
+def trim_to_last_pause(wav_path, min_keep: float = 3.0) -> float | None:
+    """Cut the sample inside its last pause (≥ 0.2 s, ≥ 35 dB below the peak) that starts after `min_keep`
+    seconds, keeping 0.15 s of that silence. Returns the new length in seconds, or None (no such pause)."""
+    levels, params = _frame_levels(wav_path)
+    quiet = [v < max(levels) - 35 for v in levels]
+    cut, i = None, 0
+    while i < len(quiet):
+        j = i
+        while j < len(quiet) and quiet[j]:
+            j += 1
+        if j - i >= 10 and i * _FRAME >= min_keep and j < len(quiet):
+            cut = i * _FRAME + 0.15
+        i = max(j, i + 1)
+    if cut is None:
+        return None
+    with wave.open(str(wav_path), "rb") as w:
+        raw = w.readframes(int(cut * params.framerate))
+    with wave.open(str(wav_path), "wb") as w:
+        w.setparams(params)
+        w.writeframes(raw)
+    return round(cut, 2)
 
 
 # ---------------------------------------------------------------- install state

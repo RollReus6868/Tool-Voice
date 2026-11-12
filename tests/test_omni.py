@@ -459,6 +459,80 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(text, "lời thoại do máy chép")
 
 
+def speech(path: Path, *parts: float) -> str:
+    """24 kHz mono WAV: positive = seconds of tone ("speech"), negative = seconds of silence."""
+    import math as _m
+    import wave as _w
+    rate, frames = 24000, bytearray()
+    for sec in parts:
+        n = int(abs(sec) * rate)
+        frames += (b"".join(int(9000 * _m.sin(2 * _m.pi * 220 * i / rate)).to_bytes(2, "little", signed=True)
+                            for i in range(n)) if sec > 0 else b"\0\0" * n)
+    with _w.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(bytes(frames))
+    return str(path)
+
+
+class CutSampleTests(unittest.TestCase):
+    """A sample cut mid-speech makes OmniVoice say its missing end ("ten de") before every sentence."""
+
+    def tearDown(self):
+        omni.ENGINE.stop()
+
+    def test_detect_and_trim_to_last_pause(self):
+        cut = speech(TMP / "cut.wav", 2.0, -0.3, 2.0, -0.4, 1.0)            # ends while "talking"
+        self.assertTrue(omni.speech_at_end(cut))
+        self.assertFalse(omni.speech_at_end(speech(TMP / "ok.wav", 2.0, -0.3)))
+        # the pause at 2.0 s is too early (< 3 s kept); the one at 4.3 s is used, + 0.15 s of its silence
+        self.assertEqual(omni.trim_to_last_pause(cut), 4.45)
+        self.assertAlmostEqual(probe_duration(cut), 4.45, delta=0.02)
+        self.assertFalse(omni.speech_at_end(cut))
+
+    def test_no_usable_pause_leaves_the_file(self):
+        path = speech(TMP / "nopause.wav", 2.0, -0.3, 3.0)
+        before = Path(path).read_bytes()
+        self.assertIsNone(omni.trim_to_last_pause(path))
+        self.assertEqual(Path(path).read_bytes(), before)
+
+    def _clone(self, sample, ref_text):
+        p, logs, seen, real = providers.OmniVoiceProvider({}), [], [], omni.ENGINE.request
+        p.log = logs.append
+
+        def spy(req, **kw):
+            seen.append(dict(req))
+            return real(req, **kw)
+
+        with mock.patch.object(omni.ENGINE, "request", spy):
+            vid = p.clone_voice(sample, "Mẫu", "es", ref_text=ref_text)
+        return p, vid, [r for r in seen if r["cmd"] == "prompt"][0], "\n".join(logs)
+
+    def test_clone_trims_and_rewrites_the_transcript(self):
+        p, vid, req, log = self._clone(speech(TMP / "c1.wav", 2.0, -0.3, 2.0, -0.4, 1.0), "a extender")
+        self.assertAlmostEqual(probe_duration(str(omni.voice_wav(vid))), 4.45, delta=0.02)
+        self.assertIsNone(req["ref_text"])                      # typed text no longer matches -> Whisper
+        self.assertIn("✂", log)
+        omni.delete_voice(vid)
+
+    def test_clean_sample_is_untouched(self):
+        p, vid, req, log = self._clone(speech(TMP / "c2.wav", 2.0, -0.3, 2.0, -0.4), "hola")
+        self.assertEqual(req["ref_text"], "hola")
+        self.assertNotIn("✂", log)
+        self.assertAlmostEqual(probe_duration(str(omni.voice_wav(vid))), 4.7, delta=0.02)
+        omni.delete_voice(vid)
+
+    def test_old_voice_with_cut_sample_warns_once_per_run(self):
+        p, vid, _req, _log = self._clone(speech(TMP / "c3.wav", 2.0, 2.0), "hola")     # no pause: kept as is
+        logs = []
+        p.log = logs.append
+        for name in ("w1", "w2"):
+            p.synthesize("Hola.", vid, str(TMP / f"{name}.mp3"), options=omni.gen_options({}))
+        self.assertEqual(sum("dừng giữa lúc đang nói" in m for m in logs), 1)
+        omni.delete_voice(vid)
+
+
 class PauseTests(unittest.TestCase):
     """Khoảng nghỉ giữa câu."""
     O = {**omni.PAUSE_DEFAULTS, "pause_enabled": True}

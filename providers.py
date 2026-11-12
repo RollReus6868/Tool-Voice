@@ -324,6 +324,7 @@ class OmniVoiceProvider(BaseProvider):
         self.config = config or {}
         self.session.close()             # no HTTP here
         self.last_ref_text = ""
+        self._checked_samples: set[str] = set()
 
     def _ask(self, req: dict, model: str = "") -> dict:
         req["model"] = (model or "").strip() or omni.DEFAULT_MODEL
@@ -336,6 +337,16 @@ class OmniVoiceProvider(BaseProvider):
         wav = omni.voice_wav(voice_id)
         self.log("🎚 Đang chuẩn bị file mẫu (WAV 24 kHz)…")
         to_wav(sample_path, str(wav))
+        if omni.speech_at_end(wav):
+            cut = omni.trim_to_last_pause(wav)
+            if cut:
+                self.log(f"✂ File mẫu dừng giữa lúc đang nói → app cắt về chỗ nghỉ ở giây {cut:g} "
+                         "(nếu không, giọng sẽ đọc thêm tiếng cuối mẫu ở đầu mỗi câu)."
+                         + (" Lời thoại mẫu bạn nhập không còn khớp nên app chép lại." if ref_text.strip() else ""))
+                ref_text = ""
+            else:
+                self.log("⚠ File mẫu dừng giữa lúc đang nói và không có chỗ nghỉ để cắt — giọng có thể đọc thêm "
+                         "tiếng cuối mẫu ở đầu mỗi câu. Nên chọn mẫu kết thúc bằng một khoảng lặng.")
         if not ref_text.strip():
             self.log("📝 Chưa có lời thoại của mẫu — OmniVoice tự chép lại bằng Whisper "
                      "(lần đầu phải tải model Whisper ~1,6 GB)…")
@@ -363,6 +374,7 @@ class OmniVoiceProvider(BaseProvider):
 
     def synthesize(self, text, voice_id, output_path, *, model="", speed=1.0, language="", options=None) -> str:
         o = options or {}
+        self._warn_cut_sample(voice_id)
         # a fixed duration applies to one request, so the text must not be split by the app then
         fixed = float(o.get("duration") or 0) > 0
         self.max_chars = 10 ** 9 if fixed else type(self).max_chars
@@ -372,6 +384,21 @@ class OmniVoiceProvider(BaseProvider):
                                            language=language, options=o)
         return super().synthesize(text, voice_id, output_path, model=model, speed=speed, language=language,
                                   options=options)
+
+    def _warn_cut_sample(self, voice_id: str) -> None:
+        """Voices cloned before 3.2 may come from a sample cut mid-speech: say so once per run."""
+        if voice_id in self._checked_samples:
+            return
+        self._checked_samples.add(voice_id)
+        wav = omni.voice_wav(voice_id)
+        try:
+            cut = wav.is_file() and omni.speech_at_end(wav)
+        except (OSError, ValueError, EOFError):
+            return
+        if cut:
+            self.log("⚠ File mẫu của giọng này dừng giữa lúc đang nói, nên model có thể đọc thêm tiếng cuối mẫu ở đầu "
+                     "mỗi câu/cụm. Cách sửa: trang Clone › OmniVoice › chọn lại file mẫu (có thể dùng chính "
+                     f"{wav}), để trống lời thoại mẫu rồi tạo giọng mới — app sẽ tự cắt về chỗ nghỉ.")
 
     def _synthesize_paused(self, pieces, voice_id, output_path, *, model, speed, language, options) -> str:
         """Khoảng nghỉ giữa câu: one request per piece, then exactly the chosen silence after each piece.

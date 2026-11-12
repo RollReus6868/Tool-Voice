@@ -1,4 +1,7 @@
-TTS Clone Studio 3.1.0
+TTS Clone Studio 3.1.1
+
+3.1.1
+- OmniVoice: sua loi doc them tieng cuoi mau (vd "ten de") o dau moi cau khi file mau bi cat giua luc dang noi - app tu cat ve cho nghi va chep lai loi mau; canh bao giong cu bi loi
 
 3.1.0
 - OmniVoice: Khoang nghi giua cau - so giay nghi rieng cho dau phay, cham phay/hai cham, dau cham/hoi/than, ba cham (chi dau cau nam giua doan)

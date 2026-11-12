@@ -1271,7 +1271,7 @@ class MainWindow(QMainWindow):
             "<code>He plays the [B EY1 S] guitar.</code><br>"
             "<b>Sửa phát âm tiếng Trung:</b> viết pinyin in hoa kèm số thanh: <code>打ZHE2出售</code>.<br>"
             "<b>Clone tốt nhất</b> khi mẫu 3–10 giây, cùng ngôn ngữ với văn bản; khác ngôn ngữ thì giọng sẽ mang âm sắc "
-            "của ngôn ngữ trong mẫu. Câu rất ngắn (1–2 giây) nên đọc bằng giọng đã lưu.")
+            "của ngôn ngữ trong mẫu. Câu rất ngắn (1–2 giây) nên đọc bằng giọng đã lưu.<br><b>Mẫu phải kết thúc ở chỗ nghỉ</b>, không cắt giữa từ: nếu không, giọng sẽ đọc thêm tiếng cuối mẫu ở đầu mỗi câu (app tự cắt về chỗ nghỉ khi clone).")
         tip_text.setWordWrap(True)
         tip_text.setTextFormat(Qt.TextFormat.RichText)
         tip_text.setProperty("role", "hint")
@@ -2071,7 +2071,7 @@ class MainWindow(QMainWindow):
                    "<b>🔌 Kiểm tra kết nối</b> rồi <b>💾 Lưu</b>. Dùng cả hai cùng lúc cũng được.")
             + step(2, c["violet"], "🧬 Tạo giọng",
                    "Trang <b>Clone giọng</b>: chọn nhà cung cấp, chọn file mẫu (1 người nói, rõ, không nhạc), đặt tên, "
-                   "tích xác nhận quyền rồi bấm <b>Bắt đầu Clone</b>. Với OmniVoice: mẫu 3–10 giây là đẹp nhất, nên chép "
+                   "tích xác nhận quyền rồi bấm <b>Bắt đầu Clone</b>. Với OmniVoice: mẫu 3–10 giây là đẹp nhất, kết thúc ở chỗ nghỉ (không cắt giữa từ), nên chép "
                    "đúng <b>lời thoại trong file mẫu</b> (hoặc bấm <b>📝 Tự chép lời</b>). Không có file mẫu? Trang "
                    "<b>OmniVoice › 🎨 Thiết kế giọng</b>: chọn giới tính, độ tuổi, cao độ… bấm <b>Tạo thử</b>, ưng thì "
                    "<b>💾 Lưu</b>. Giọng Inworld có sẵn: <b>☁ Duyệt giọng Inworld</b> hoặc <b>🔄 Đồng bộ Inworld</b>.")

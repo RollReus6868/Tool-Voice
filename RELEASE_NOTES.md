@@ -1,26 +1,22 @@
-## TTS Clone Studio 3.1.0
+## TTS Clone Studio 3.1.1
 
-### Mới
-- ⏸ **Khoảng nghỉ giữa câu** cho OmniVoice (trang 🌍 OmniVoice, thẻ mới dưới *Thông số tạo giọng*). OmniVoice hay đọc liền các câu ngắn như “Gold. pearls. silk. spice.”. Bật mục này thì app đọc từng cụm rồi chèn đúng số giây lặng bạn đặt sau mỗi dấu câu **nằm giữa đoạn**:
+### Sửa lỗi
+- **OmniVoice đọc thêm một tiếng lạ (ví dụ "ten de") ở đầu mỗi câu/cụm.** Nguyên nhân: file mẫu dùng để clone giọng bị cắt **giữa lúc đang nói** (ví dụ "…a exten|"). Model tưởng phần cuối chưa được nói nên đọc bù nó ở đầu **mỗi lần tạo** — khi bật ⏸ Khoảng nghỉ giữa câu, mỗi cụm là một lần tạo nên tiếng này lặp lại ở mọi chỗ ngắt.
+  - Khi clone giọng OmniVoice, app tự phát hiện mẫu bị cắt giữa lúc nói, **cắt về chỗ nghỉ gần nhất** (giữ ít nhất 3 giây) và chép lại lời thoại mẫu bằng Whisper cho khớp. Mẫu không có chỗ nghỉ để cắt thì app cảnh báo.
+  - Giọng đã tạo từ trước bằng mẫu bị cắt: khi đọc, nhật ký hiện cảnh báo kèm cách sửa.
 
-  | Dấu | Mặc định |
-  |---|---|
-  | Dấu phẩy `,` | 0,25 giây |
-  | Chấm phẩy, hai chấm `; :` | 0,35 giây |
-  | Dấu chấm, hỏi, than `. ? !` | 0,5 giây |
-  | Ba chấm `…` `...` | 0,7 giây |
-
-  - Cuối đoạn không thêm khoảng nghỉ; đoạn không có dấu câu ở giữa đọc như cũ.
-  - Đặt 0 cho dấu nào thì không ngắt ở dấu đó. Số (`1,000`, `3.5`), viết tắt (`Dr.`, `U.S.`) và chữ cái viết tắt tên (`J. K.`) không bị ngắt.
-  - Dùng được ở Đọc văn bản và Hàng loạt Excel. Không áp dụng khi đã đặt **Thời lượng (s)**.
-  - Đoạn có nhiều dấu câu sẽ đọc lâu hơn một chút vì mỗi cụm là một lần tạo giọng.
+### Cách sửa giọng đang bị lỗi
+1. Trang **🧬 Clone giọng** › nhà cung cấp **OmniVoice**.
+2. Chọn lại file mẫu (file gốc, hoặc file `.wav` của giọng mà nhật ký cảnh báo chỉ ra).
+3. **Để trống ô lời thoại mẫu**, đặt tên rồi bấm **Bắt đầu Clone** — app tự cắt về chỗ nghỉ và chép lời.
+4. Dùng giọng mới, xoá giọng cũ.
 
 ### Tải bản nào?
 | Máy | File |
 |---|---|
-| Windows (khuyên dùng) | `TTSCloneStudio-3.1.0-windows-setup.exe` |
-| Windows, không muốn cài | `TTSCloneStudio-3.1.0-windows-portable.exe` |
-| Mac chip Apple (M1–M4) | `TTSCloneStudio-3.1.0-mac-arm64.zip` |
-| Mac chip Intel | `TTSCloneStudio-3.1.0-mac-x64.zip` |
+| Windows (khuyên dùng) | `TTSCloneStudio-3.1.1-windows-setup.exe` |
+| Windows, không muốn cài | `TTSCloneStudio-3.1.1-windows-portable.exe` |
+| Mac chip Apple (M1–M4) | `TTSCloneStudio-3.1.1-mac-arm64.zip` |
+| Mac chip Intel | `TTSCloneStudio-3.1.1-mac-x64.zip` |
 
-Đang dùng bản 2.1 trở lên thì không cần tải: app sẽ hiện nút **⬆ Có bản mới** và tự cài. Những gì có từ 3.0 (OmniVoice, hai kiểu giao diện, bỏ MiniMax) giữ nguyên.
+Đang dùng bản 2.1 trở lên thì không cần tải: app sẽ hiện nút **⬆ Có bản mới** và tự cài.

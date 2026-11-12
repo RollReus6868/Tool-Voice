@@ -1,4 +1,4 @@
-# 🎙 TTS Clone Studio 3.1
+# 🎙 TTS Clone Studio 3.1.1
 
 Ứng dụng **Windows & macOS**: **clone giọng nói → đọc văn bản → xuất MP3 / MP4**, chạy lẻ hoặc hàng loạt từ file Excel.
 Hai cách tạo giọng: **Inworld** (API chính thức, trả phí theo ký tự) và **OmniVoice** (miễn phí, chạy ngay trên máy bạn, 600+ ngôn ngữ). **Tự cập nhật** qua GitHub Releases.
@@ -80,7 +80,7 @@ Dòng đầu là tiêu đề. Ví dụ (bấm **📥 Tạo file Excel mẫu** đ
 |---|---|---|
 | Định dạng | WAV, MP3 | WAV, MP3, M4A, FLAC, OGG |
 | Độ dài | 5–30 giây (tốt nhất 10–30) | tốt nhất 3–10 giây |
-| Lưu ý | Giọng nằm trên tài khoản Inworld | Nên nhập đúng lời thoại của mẫu (hoặc **📝 Tự chép lời**). Giọng chỉ nằm trên máy này |
+| Lưu ý | Giọng nằm trên tài khoản Inworld | Nên nhập đúng lời thoại của mẫu (hoặc **📝 Tự chép lời**). Mẫu phải kết thúc ở chỗ nghỉ — mẫu bị cắt giữa từ thì app tự cắt về chỗ nghỉ gần nhất và chép lại lời. Giọng chỉ nằm trên máy này |
 
 Mẫu tốt: 1 người nói, rõ, không nhạc nền, không vang. Chỉ clone giọng của bạn hoặc giọng đã được người nói cho phép.
 
@@ -110,6 +110,7 @@ Mẫu tốt: 1 người nói, rõ, không nhạc nền, không vang. Chỉ clone
 | `HTTP 429` | Giảm số luồng; app tự thử lại 4 lần |
 | Cài OmniVoice thất bại | Xem ô Nhật ký: thường do mạng hoặc thiếu dung lượng. Bấm Cài lại; thử chọn Phần cứng **Chỉ CPU** nếu bản GPU lỗi |
 | `Không tải được model từ HuggingFace` | Kiểm tra mạng rồi đọc lại; model chỉ tải một lần |
+| OmniVoice đọc thêm một tiếng lạ (ví dụ "ten de") ở đầu mỗi câu/cụm | File mẫu bị cắt giữa lúc đang nói. Tạo lại giọng ở trang Clone (để trống lời thoại mẫu) — từ 3.1.1 app tự cắt về chỗ nghỉ |
 | `Hết bộ nhớ GPU/RAM` | Đóng bớt chương trình, giảm **Mỗi đoạn (s)** ở trang OmniVoice, dùng mẫu giọng 3–10 giây |
 | OmniVoice đọc rất chậm | Máy đang chạy bằng CPU. Cần card NVIDIA (hoặc Mac chip Apple) để nhanh |
 | Không mở được app | Xem `TTSCloneStudio_crash.log` cạnh ứng dụng hoặc `%APPDATA%\TTSCloneStudio\app.log` |
