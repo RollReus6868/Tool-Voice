@@ -252,7 +252,7 @@ assert (j2["voice"]["uid"], j2["model"], j2["fmt"], j2["merge"], j2["out_dir"]) 
 # the form can change freely after adding: the queue keeps what was added
 w.batch_output_dir.setText(str(tmp / "khong_dung")); w.batch_format.buttons["mp3"].click(); w.batch_merge.setChecked(False)
 SYNTH_CALLS.clear(); errors_before = len(errors)
-w.run_queue(); pump()
+w.run_queue()      # checked before any event loop turn: a fast machine may finish the 3 fake rows at once
 assert w.queue_jobs[0]["status"] == "running" and not w.queue_add_btn.isEnabled() and not w.batch_run.isEnabled()
 t0 = time.time()
 while (w.queue_pos is not None or (w.batch_worker and w.batch_worker.isRunning())) and time.time() - t0 < 120: pump(2)
@@ -271,7 +271,7 @@ assert len(errors) == errors_before, errors[errors_before:]
 assert w.batch_run.isEnabled() and w.queue_run_btn.isEnabled() and not w.batch_retry.isEnabled()
 shot("batch_queue")
 # stop: the running file stops and the next one never starts
-w.run_queue(); pump(); w.stop_batch()
+w.run_queue(); w.stop_batch()      # stop at once, before the first file can finish
 t0 = time.time()
 while (w.queue_pos is not None or (w.batch_worker and w.batch_worker.isRunning())) and time.time() - t0 < 60: pump(2)
 pump()
