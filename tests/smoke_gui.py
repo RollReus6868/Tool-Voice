@@ -224,6 +224,64 @@ exp = sum(len(w.batch_tasks[i]["text"]) for i in (1, 4, 5))
 assert after - before == exp, (after - before, exp)
 assert storage.ConfigStore().load()["batch_rows"] == "2, 5-"
 
+# ================= 3.2 Hàng chờ: several Excel files, each keeping its own settings + folder
+xl2 = tmp / "tap_2.xlsx"; wb = Workbook(); ws = wb.active; ws.title = "Kịch bản"
+ws.append(["filename", "text"]); ws.append(["a1", "Tập hai, câu một."]); ws.append(["a2", "Tập hai, câu hai."]); wb.save(xl2)
+q1, q2 = tmp / "queue_1", tmp / "queue 2"
+assert not w.queue_run_btn.isEnabled() and not w.queue_del_btn.isEnabled()
+# job 1: the first file, rows 2 and 5-, Inworld voice, speed 1.2, MP3
+w.batch_speed.setValue(1.2); w.batch_output_dir.setText(str(q1)); pump()
+w.queue_add(); pump()
+# job 2: another file, another voice/model/format/folder, merged
+w._open_batch_file(str(xl2)); pump(); w.batch_rows.setText("")
+w.batch_voice.setCurrentIndex(w.batch_voice.findData("u3")); pump()
+w.batch_model.setCurrentText("inworld-tts-2"); w.batch_speed.setValue(0.9)
+w.batch_output_dir.setText(str(q2)); w.batch_format.buttons["both"].click(); w.batch_merge.setChecked(True); pump()
+w.queue_add(); pump()
+# job 3 then removed; moving rows keeps the jobs intact
+w.queue_add(); pump(); assert w.queue_table.rowCount() == 3
+w.queue_table.selectRow(2); pump(); w.queue_remove(); pump()
+assert len(w.queue_jobs) == 2 and w.queue_table.rowCount() == 2 and "2 file" in w.queue_run_btn.text()
+w.queue_table.selectRow(1); pump(); w.queue_move(-1); pump()
+assert [Path(j["path"]).name for j in w.queue_jobs] == ["tap_2.xlsx", "kich_ban.xlsx"]
+w.queue_table.selectRow(0); pump(); w.queue_move(1); pump()
+assert [Path(j["path"]).name for j in w.queue_jobs] == ["kich_ban.xlsx", "tap_2.xlsx"]
+j1, j2 = w.queue_jobs
+assert (j1["voice"]["uid"], j1["speed"], j1["fmt"], j1["rows"], j1["indices"]) == ("u2", 1.2, "mp3", "2, 5-", [1, 4, 5]), j1
+assert (j2["voice"]["uid"], j2["model"], j2["fmt"], j2["merge"], j2["out_dir"]) == ("u3", "inworld-tts-2", "both", True, str(q2))
+# the form can change freely after adding: the queue keeps what was added
+w.batch_output_dir.setText(str(tmp / "khong_dung")); w.batch_format.buttons["mp3"].click(); w.batch_merge.setChecked(False)
+SYNTH_CALLS.clear(); errors_before = len(errors)
+w.run_queue(); pump()
+assert w.queue_jobs[0]["status"] == "running" and not w.queue_add_btn.isEnabled() and not w.batch_run.isEnabled()
+t0 = time.time()
+while (w.queue_pos is not None or (w.batch_worker and w.batch_worker.isRunning())) and time.time() - t0 < 120: pump(2)
+pump()
+assert [j["status"] for j in w.queue_jobs] == ["done", "done"], [(j["status"], j.get("message")) for j in w.queue_jobs]
+assert sorted(p.name for p in q1.iterdir()) == ["1_2.mp3", "2.mp3", "6.mp3"], sorted(p.name for p in q1.iterdir())
+made2 = sorted(p.name for p in q2.iterdir())
+assert made2 == ["a1.mp3", "a1.mp4", "a2.mp3", "a2.mp4", "tap_2_GOP.mp3", "tap_2_GOP.mp4"], made2
+assert not (tmp / "khong_dung").exists()
+speeds = {round(kw["speed"], 2) for _t, kw in SYNTH_CALLS}
+models = {kw["model"] for _t, kw in SYNTH_CALLS}
+assert speeds == {1.2, 0.9} and models == {"inworld-tts-2-flash", "inworld-tts-2"}, (speeds, models)
+assert "✅ 3" in w.queue_table.item(0, 6).text() and "✅ 2" in w.queue_table.item(1, 6).text()
+assert "Hàng chờ hoàn tất" in w.batch_status.text() and "2/2 file" in w.batch_status.text(), w.batch_status.text()
+assert len(errors) == errors_before, errors[errors_before:]
+assert w.batch_run.isEnabled() and w.queue_run_btn.isEnabled() and not w.batch_retry.isEnabled()
+shot("batch_queue")
+# stop: the running file stops and the next one never starts
+w.run_queue(); pump(); w.stop_batch()
+t0 = time.time()
+while (w.queue_pos is not None or (w.batch_worker and w.batch_worker.isRunning())) and time.time() - t0 < 60: pump(2)
+pump()
+assert w.queue_jobs[1]["status"] == "stopped" and "dừng" in w.batch_status.text(), (w.queue_jobs, w.batch_status.text())
+QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+w.queue_clear(); pump()
+QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.No)
+assert not w.queue_jobs and w.queue_table.rowCount() == 0 and not w.queue_run_btn.isEnabled()
+w._open_batch_file(str(xl)); w.batch_format.buttons["mp3"].click(); w.batch_merge.setChecked(False); pump()
+
 # voice browser dialog
 dlg = dialogs.ImportVoicesDialog("Inworld", {}, {}, {"Sarah"}, w, kind="Tất cả", preview=lambda v: w._preview_voice(
     "Inworld", v["voice_id"], v["name"], v.get("language", ""), "pv_" + v["voice_id"]))

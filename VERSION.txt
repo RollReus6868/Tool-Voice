@@ -1,4 +1,7 @@
-TTS Clone Studio 3.1.1
+TTS Clone Studio 3.2.0
+
+3.2.0
+- Hang loat Excel: hang cho nhieu file Excel, moi file giu cai dat va thu muc luu rieng, chay lan luot
 
 3.1.1
 - OmniVoice: sua loi doc them tieng cuoi mau (vd "ten de") o dau moi cau khi file mau bi cat giua luc dang noi - app tu cat ve cho nghi va chep lai loi mau; canh bao giong cu bi loi

@@ -1,4 +1,4 @@
-# 🎙 TTS Clone Studio 3.1.1
+# 🎙 TTS Clone Studio 3.2
 
 Ứng dụng **Windows & macOS**: **clone giọng nói → đọc văn bản → xuất MP3 / MP4**, chạy lẻ hoặc hàng loạt từ file Excel.
 Hai cách tạo giọng: **Inworld** (API chính thức, trả phí theo ký tự) và **OmniVoice** (miễn phí, chạy ngay trên máy bạn, 600+ ngôn ngữ). **Tự cập nhật** qua GitHub Releases.
@@ -55,7 +55,7 @@ Lần đầu mở, Windows SmartScreen có thể báo *Unknown publisher* → b�
 | 3 | 🗣 **Đọc văn bản** | Chọn giọng, dán nội dung, chọn **MP3 / MP4 / Cả hai** → **🔊 Tạo giọng đọc** |
 | – | 🎭 **Delivery (Inworld)** | Ổn định / Cân bằng / Sáng tạo, ✨ khử nhiễu, 💬 chỉ dẫn phong cách (model inworld-tts-2). Model mặc định: `inworld-tts-2-flash` |
 | – | 🌍 **OmniVoice** | Cài/gỡ bộ máy, 🎨 thiết kế giọng (giới tính, độ tuổi, cao độ, thì thầm, giọng tiếng Anh, phương ngữ Trung), 🎛 thông số (số bước, CFG, khử nhiễu, ép thời lượng, đọc số thành chữ…), ⏸ khoảng nghỉ giữa câu (số giây nghỉ riêng cho dấu phẩy, chấm phẩy, dấu chấm, ba chấm). Ở trang Đọc văn bản có **➕ Chèn tiếng động** (`[laughter]`, `[sigh]`…) |
-| 4 | 📊 **Hàng loạt Excel** | Chọn file `.xlsx`, chọn cột nội dung và cột tên file → **🚀 Chạy hàng loạt** |
+| 4 | 📊 **Hàng loạt Excel** | Chọn file `.xlsx`, chọn cột nội dung và cột tên file → **🚀 Chạy hàng loạt**. Nhiều file: **➕ Thêm vào hàng chờ** từng file rồi **▶ Chạy hàng chờ** |
 | – | 📈 **Mức dùng** | Trang riêng giống trang Usage của Inworld (24 giờ/7/30/90 ngày, theo model, biểu đồ, bảng). Bấm 🔄 **Đồng bộ với Inworld**, chép số dư ở Billing và số ký tự ở Usage → app lấy làm mốc và tự cộng các lần đọc sau đó |
 | – | 🎬 **Video MP4** | Chọn ảnh nền, màu nền, khung hình (16:9, 9:16 Shorts/TikTok, 1:1) |
 | – | 🎨 **Giao diện** | Cài đặt API › Giao diện: **Cổ điển** hoặc **Youwee** (kính mờ, 6 chủ đề màu); nút Sáng/Tối ở góc trên phải |
@@ -74,6 +74,7 @@ Dòng đầu là tiêu đề. Ví dụ (bấm **📥 Tạo file Excel mẫu** đ
 - **Gộp tất cả thành 1 file**: tạo thêm `TenExcel_GOP.mp3/.mp4` theo thứ tự dòng.
 - **Số luồng**: 2–3 là an toàn; cao quá dễ bị nhà cung cấp giới hạn tốc độ. Với OmniVoice máy đọc lần lượt từng dòng, nhiều luồng không nhanh hơn.
 - **🔁 Chạy lại dòng lỗi**: chỉ chạy lại các dòng lỗi.
+- **📋 Hàng chờ nhiều file Excel**: chọn file + giọng + thư mục lưu rồi bấm **➕ Thêm vào hàng chờ**; lặp lại cho file khác. Mỗi file giữ nguyên cài đặt lúc thêm (sheet, cột, STT, giọng, model, tốc độ, tùy chọn giọng, định dạng, video, số luồng, gộp, thư mục). **▶ Chạy hàng chờ** chạy lần lượt từng file; **⏹ Dừng** dừng cả hàng chờ. Có ⬆ ⬇ đổi thứ tự, 🗑 xoá, 📂 mở thư mục của từng file. Chạy lại hàng chờ với **Bỏ qua dòng đã có file** để chỉ làm nốt các dòng còn thiếu.
 
 ### Giọng mẫu để clone
 | | Inworld | OmniVoice |

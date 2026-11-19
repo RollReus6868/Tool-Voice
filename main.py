@@ -108,6 +108,9 @@ class MainWindow(QMainWindow):
         self.last_outputs: list[str] = []
         self.latest_release = None
         self.batch_selected: set[int] = set()   # 0-based task indexes chosen by the STT filter
+        self.queue_jobs: list[dict] = []        # "Hàng chờ": batch jobs, each with its own settings + folder
+        self.queue_pos: int | None = None       # index of the job running now (None = queue not running)
+        self._queue_stop = False
         self.iw_opts: dict[str, dict] = {}
         self.ov_boxes: dict[str, QWidget] = {}
         self.ov_fields: dict[str, QWidget] = {}
@@ -802,6 +805,7 @@ class MainWindow(QMainWindow):
         cfg.body.addStretch()
         row.add(cfg, 1)
         lay.addWidget(row)
+        lay.addWidget(self._queue_card())
 
         tiles = QHBoxLayout()
         tiles.setSpacing(10)
@@ -855,6 +859,52 @@ class MainWindow(QMainWindow):
         self.batch_table.setWordWrap(False)
         lay.addWidget(self.batch_table, 1)
         return page
+
+    def _queue_card(self) -> Card:
+        """"Hàng chờ": several Excel files, each with its own settings and output folder, run one after another."""
+        card = Card("📋  Hàng chờ nhiều file Excel", "blue",
+                    "Chọn file + giọng + thư mục lưu ở trên rồi bấm ➕ — mỗi file giữ nguyên cài đặt lúc thêm "
+                    "(sheet, cột, STT, giọng, model, tốc độ, tùy chọn giọng, định dạng, video, luồng, thư mục). "
+                    "Lặp lại cho file khác, rồi bấm ▶ để chạy lần lượt. ⏹ Dừng sẽ dừng cả hàng chờ.")
+        t = self.queue_table = QTableWidget(0, 7)
+        t.setHorizontalHeaderLabels(["#", "File Excel", "Giọng", "Dòng", "Định dạng", "Lưu vào", "Trạng thái"])
+        h = t.horizontalHeader()
+        for c in (0, 2, 3, 4):
+            h.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        for c in (1, 5):                                     # file and folder share the free width
+            h.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
+        h.setSectionResizeMode(6, QHeaderView.ResizeMode.Interactive)
+        t.setColumnWidth(6, 170)
+        t.verticalHeader().setVisible(False)
+        t.setAlternatingRowColors(True)
+        t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        t.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        t.setWordWrap(False)
+        t.setMinimumHeight(120)
+        t.setMaximumHeight(200)
+        t.itemSelectionChanged.connect(self._sync_queue_buttons)
+        card.add(t)
+        r1 = QHBoxLayout()
+        self.queue_add_btn = button("➕  Thêm vào hàng chờ", tint="green", slot=self.queue_add,
+                                    tip="Thêm file Excel đang chọn cùng toàn bộ cài đặt ở trên")
+        self.queue_run_btn = button("▶  Chạy hàng chờ", variant="blue", slot=self.run_queue)
+        r1.addWidget(self.queue_add_btn)
+        r1.addWidget(self.queue_run_btn)
+        r1.addStretch()
+        card.add(r1)
+        r2 = QHBoxLayout()
+        self.queue_up_btn = button("⬆", size="small", tint="blue", tip="Lên trên", slot=lambda: self.queue_move(-1))
+        self.queue_down_btn = button("⬇", size="small", tint="blue", tip="Xuống dưới", slot=lambda: self.queue_move(1))
+        self.queue_open_btn = button("📂 Mở thư mục", size="small", tint="amber", slot=self.queue_open_folder)
+        self.queue_del_btn = button("🗑 Xoá mục", size="small", tint="red", slot=self.queue_remove)
+        self.queue_clear_btn = button("🧹 Xoá hết", size="small", tint="red", slot=self.queue_clear)
+        for b in (self.queue_up_btn, self.queue_down_btn, self.queue_open_btn, self.queue_del_btn, self.queue_clear_btn):
+            r2.addWidget(b)
+        r2.addStretch()
+        card.add(r2)
+        self._sync_queue_buttons()
+        return card
 
     # ---------------------------------------------------------------- video
     def _page_video(self):
@@ -2085,7 +2135,9 @@ class MainWindow(QMainWindow):
                    "Dòng đầu là tiêu đề, ví dụ cột <b>filename</b> và <b>text</b> (bấm <b>📥 Tạo file Excel mẫu</b>). "
                    "Chọn cột, bấm <b>🚀 Chạy hàng loạt</b>. Bật <b>⏭ Bỏ qua dòng đã có file</b> để chạy tiếp khi bị ngắt; "
                    "bật <b>🔗 Gộp</b> để có thêm 1 file tổng. Chỉ muốn chạy vài dòng? Gõ vào <b>🔢 Chỉ chạy STT</b>, "
-                   "ví dụ <code>1-10, 15, 20-</code> (số STT ở cột đầu bảng).")
+                   "ví dụ <code>1-10, 15, 20-</code> (số STT ở cột đầu bảng). Nhiều file Excel một lần: chọn file + giọng + "
+                   "thư mục rồi bấm <b>➕ Thêm vào hàng chờ</b>, lặp lại cho từng file (mỗi file giữ cài đặt riêng), "
+                   "rồi bấm <b>▶ Chạy hàng chờ</b>.")
             + f"<p style='color:{c['violet']}'><b>📈 Mức dùng Inworld:</b> Inworld không cho app đọc số dư, nên ở trang "
               "<b>Mức dùng</b> bấm <b>🔄 Đồng bộ với Inworld</b> và chép vào: số dư ở trang <b>Billing</b>, số ký tự "
               "(tổng và từng model) ở trang <b>Usage</b>. App lấy đúng số đó làm mốc, tự cộng mỗi lần đọc sau đó, vẽ "
@@ -2200,6 +2252,8 @@ class MainWindow(QMainWindow):
             self.refresh_voices()
         for i, st in enumerate(getattr(self, "batch_state", [])):
             self._paint_batch_status(i, st, None)
+        if hasattr(self, "queue_table"):
+            self._refresh_queue()
 
     # ================================================================ settings
     def _load_settings(self):
@@ -3047,10 +3101,17 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.batch_tasks = []
             self.log(f"❌ Lỗi đọc Excel: {exc}")
-        self.batch_state = ["pending"] * len(self.batch_tasks)
+        self._fill_batch_table(self.batch_tasks)
+        self.batch_progress.setValue(0)
+        self.batch_retry.setEnabled(False)
+        self._apply_row_selection()
+
+    def _fill_batch_table(self, tasks: list[dict]):
+        self.batch_tasks = tasks
+        self.batch_state = ["pending"] * len(tasks)
         t = self.batch_table
-        t.setRowCount(len(self.batch_tasks))
-        for i, task in enumerate(self.batch_tasks):
+        t.setRowCount(len(tasks))
+        for i, task in enumerate(tasks):
             task["stt"] = i + 1
             preview = task["text"].replace("\n", " ")
             vals = [str(i + 1), str(task["row_no"]), task["filename"],
@@ -3067,9 +3128,6 @@ class MainWindow(QMainWindow):
                     f.setBold(True)
                     it.setFont(f)
                 t.setItem(i, c, it)
-        self.batch_progress.setValue(0)
-        self.batch_retry.setEnabled(False)
-        self._apply_row_selection()
 
     def _selection_error(self) -> str:
         try:
@@ -3080,6 +3138,8 @@ class MainWindow(QMainWindow):
 
     def _apply_row_selection(self):
         """Read the STT filter, mark rows that will not run, update the hint and tiles."""
+        if self.batch_worker and self.batch_worker.isRunning():
+            return
         n = len(self.batch_tasks)
         err = ""
         try:
@@ -3087,10 +3147,7 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             err, chosen = str(exc), []
         self.batch_selected = {k - 1 for k in chosen}
-        running = bool(self.batch_worker and self.batch_worker.isRunning())
         for i in range(n):
-            if running:
-                break
             if self.batch_state[i] in ("pending", "unselected"):
                 self.batch_state[i] = "pending" if (i in self.batch_selected or err) else "unselected"
                 self._paint_batch_status(i, self.batch_state[i], "")
@@ -3105,7 +3162,7 @@ class MainWindow(QMainWindow):
             self.batch_rows_hint.setText("")
             self.batch_rows_hint.setStyleSheet("")
         self._update_tiles()
-        if self.batch_path and not running:
+        if self.batch_path:
             chars = sum(len(self.batch_tasks[i]["text"]) for i in self.batch_selected)
             msg = f"Sẵn sàng: {len(self.batch_selected)}/{n} dòng • ~{fmt_duration(chars / 14)} audio"
             voice = self._voice_from_combo(self.batch_voice)
@@ -3185,49 +3242,49 @@ class MainWindow(QMainWindow):
         self.log(f"📥 Đã tạo file mẫu: {path}")
         self._open_batch_file(path)
 
-    def start_batch(self, only_failed: bool = False):
+    def _batch_job(self, only_failed: bool = False) -> dict | None:
+        """Read and check the batch form; a job dict (all the settings of one run) or None after a message."""
         voice = self._voice_from_combo(self.batch_voice)
         if not voice:
             QMessageBox.warning(self, "Chưa có giọng", "Hãy chọn giọng cho chạy hàng loạt.")
-            return
+            return None
         if not only_failed:
             self._batch_load_tasks()
         if not self.batch_tasks:
             QMessageBox.warning(self, "Chưa có dữ liệu", "Hãy chọn file Excel có ít nhất 1 dòng nội dung.")
-            return
+            return None
         if only_failed:
             indices = [i for i, s in enumerate(self.batch_state) if s in ("error", "stopped")]
             if not indices:
                 QMessageBox.information(self, "Không có dòng lỗi", "Không có dòng nào cần chạy lại.")
-                return
+                return None
         else:
             err = self._selection_error()
             if err:
                 QMessageBox.warning(self, "Số thứ tự không hợp lệ", err)
                 self.batch_rows.setFocus()
-                return
+                return None
             self._apply_row_selection()
             indices = sorted(self.batch_selected)
             if not indices:
                 QMessageBox.warning(self, "Chưa chọn dòng", "Không có dòng nào được chọn để chạy.")
-                return
+                return None
         out_dir = self.batch_output_dir.text().strip()
         if not out_dir:
             QMessageBox.warning(self, "Thiếu thư mục", "Hãy chọn thư mục lưu file.")
-            return
+            return None
         try:
             Path(out_dir).mkdir(parents=True, exist_ok=True)
         except Exception as exc:
             QMessageBox.critical(self, "Thư mục lỗi", f"Không tạo được thư mục:\n{exc}")
-            return
+            return None
         fmt = self.batch_format.value()
         if fmt in ("mp4", "both") and not find_ffmpeg():
             QMessageBox.critical(self, "Thiếu ffmpeg", "Không tìm thấy ffmpeg nên chưa tạo được MP4. Xem trang 🎬 Video MP4.")
-            return
+            return None
         prov = voice["provider"]
-        secrets = self._secrets()
         if not self._provider_ready(prov):
-            return
+            return None
         model = self.batch_model.currentText().strip() or MODELS[prov][0]
         speed = self.batch_speed.value()
         self.config = self.config_store.save({
@@ -3240,12 +3297,36 @@ class MainWindow(QMainWindow):
             self._save_iw_options("batch")
             if model not in INSTRUCTION_MODELS:
                 options["instruction"] = ""
+        rows = "" if only_failed or len(indices) == len(self.batch_tasks) else self.batch_rows.text().strip()
+        return {
+            "path": self.batch_path, "sheet": self.batch_sheet.currentText(), "tasks": self.batch_tasks,
+            "indices": indices, "rows": rows, "voice": voice, "model": model, "speed": speed, "out_dir": out_dir,
+            "fmt": fmt, "video": self._video_settings(), "threads": self.batch_threads.value(),
+            "skip": self.batch_skip.isChecked(), "merge": self.batch_merge.isChecked() and not only_failed,
+            "merge_name": safe_filename(Path(self.batch_path).stem + "_GOP"), "options": options,
+            "retry": only_failed,
+        }
+
+    def start_batch(self, only_failed: bool = False):
+        job = self._batch_job(only_failed)
+        if job:
+            self._run_batch_job(job)
+
+    def _run_batch_job(self, job: dict):
+        """Start a BatchWorker for one job; the table shows that job's rows."""
+        if job["tasks"] is not self.batch_tasks:              # a queued job: show its own rows
+            self._fill_batch_table(job["tasks"])
+            self.batch_selected = set(job["indices"])
+            for i in range(len(self.batch_tasks)):
+                if i not in self.batch_selected:
+                    self.batch_state[i] = "unselected"
+                    self._paint_batch_status(i, "unselected", "")
+        indices = job["indices"]
         self.batch_map = indices
         for i in indices:
             self.batch_state[i] = "pending"
             self._paint_batch_status(i, "pending", "")
         self._update_tiles()
-        merge = self.batch_merge.isChecked() and not only_failed
         self.batch_progress.setRange(0, len(indices))
         self.batch_progress.setValue(0)
         self.batch_status.setText(f"Đang chạy 0/{len(indices)}…")
@@ -3253,17 +3334,18 @@ class MainWindow(QMainWindow):
         self.batch_retry.setEnabled(False)
         self.batch_stop.setEnabled(True)
         self.batch_run.setText("⏳   Đang chạy…")
-        picked = "" if only_failed or len(indices) == len(self.batch_tasks) else f" (STT {self.batch_rows.text().strip()})"
-        self.log(f"🚀 Chạy {'lại ' if only_failed else ''}{len(indices)} dòng{picked} bằng {voice.get('local_name')} "
-                 f"({prov}, {model}, {speed:.2f}×{self._opts_text(options)}, {self.batch_threads.value()} luồng, "
-                 f"định dạng {fmt.upper()})")
-
+        self._sync_queue_buttons()
+        voice, prov = job["voice"], job["voice"]["provider"]
+        picked = f" (STT {job['rows']})" if job["rows"] else ""
+        self.log(f"🚀 Chạy {'lại ' if job['retry'] else ''}{len(indices)} dòng{picked} của {Path(job['path']).name} "
+                 f"bằng {voice.get('local_name')} ({prov}, {job['model']}, {job['speed']:.2f}×"
+                 f"{self._opts_text(job['options'])}, {job['threads']} luồng, định dạng {job['fmt'].upper()}) "
+                 f"→ {job['out_dir']}")
         self.batch_worker = BatchWorker(
-            tasks=[self.batch_tasks[i] for i in indices], voice=voice, model=model, speed=speed, out_dir=out_dir,
-            fmt=fmt, video=self._video_settings(), threads=self.batch_threads.value(),
-            skip_existing=self.batch_skip.isChecked(), merge_all=merge,
-            merge_name=safe_filename(Path(self.batch_path).stem + "_GOP"),
-            secrets=secrets, config=self._live_config(), options=options, parent=self,
+            tasks=[job["tasks"][i] for i in indices], voice=voice, model=job["model"], speed=job["speed"],
+            out_dir=job["out_dir"], fmt=job["fmt"], video=job["video"], threads=job["threads"],
+            skip_existing=job["skip"], merge_all=job["merge"], merge_name=job["merge_name"],
+            secrets=self._secrets(), config=self._live_config(), options=job["options"], parent=self,
         )
         self.batch_worker.log.connect(self.log)
         self.batch_worker.usage.connect(self._record_usage)
@@ -3290,6 +3372,15 @@ class MainWindow(QMainWindow):
         self.batch_status.setText(f"Đang chạy {done}/{total}…")
 
     def _batch_done(self, s: dict):
+        if self._queue_running():                # one file of the queue: no dialog, the queue reports at the end
+            job = self.queue_jobs[self.queue_pos]
+            job["summary"] = s
+            job["status"] = "stopped" if s.get("cancelled") else "done"
+            if s.get("fatal"):
+                job.update(status="error", message=s["fatal"])
+                self.log(f"❌ {Path(job['path']).name}: {s['fatal']}")
+            self._refresh_queue(select=self.queue_pos)
+            return
         msg = f"Thành công {s.get('ok', 0)} • Lỗi {s.get('error', 0)} • Bỏ qua {s.get('skipped', 0)}"
         if s.get("stopped"):
             msg += f" • Dừng {s['stopped']}"
@@ -3317,13 +3408,185 @@ class MainWindow(QMainWindow):
         self.batch_run.setText("🚀   Chạy hàng loạt")
         self.batch_stop.setEnabled(False)
         self.batch_retry.setEnabled(any(s in ("error", "stopped") for s in self.batch_state))
+        if self._queue_running():
+            self._queue_next()
+        self._sync_queue_buttons()
 
     def stop_batch(self):
         if self.batch_worker and self.batch_worker.isRunning():
             self.batch_worker.cancel()
+            self._queue_stop = True
             self.batch_stop.setEnabled(False)
             self.batch_status.setText("⏹ Đang dừng — chờ các dòng đang chạy kết thúc…")
             self.log("⏹ Đã yêu cầu dừng batch.")
+
+    # ================================================================ batch queue
+    QUEUE_TEXT = {"pending": "⏳ Chờ chạy", "running": "▶ Đang chạy…", "stopped": "⏹ Đã dừng", "error": "❌ Lỗi"}
+
+    def _queue_running(self) -> bool:
+        return self.queue_pos is not None
+
+    def _sync_queue_buttons(self):
+        if not hasattr(self, "queue_table"):
+            return
+        busy = bool(self.batch_worker and self.batch_worker.isRunning()) or self._queue_running()
+        row = self.queue_table.currentRow() if self.queue_table.selectedItems() else -1
+        n = len(self.queue_jobs)
+        self.queue_add_btn.setEnabled(not busy)
+        self.queue_run_btn.setEnabled(not busy and n > 0)
+        self.queue_clear_btn.setEnabled(not busy and n > 0)
+        self.queue_del_btn.setEnabled(not busy and row >= 0)
+        self.queue_up_btn.setEnabled(not busy and row > 0)
+        self.queue_down_btn.setEnabled(not busy and 0 <= row < n - 1)
+        self.queue_open_btn.setEnabled(row >= 0)
+        self.queue_run_btn.setText(f"▶  Chạy hàng chờ ({n} file)" if n else "▶  Chạy hàng chờ")
+
+    def _queue_status_text(self, job: dict) -> str:
+        s = job.get("summary")
+        if job["status"] == "done" and s:
+            text = f"✅ {s.get('ok', 0)}  ❌ {s.get('error', 0)}  ⏭ {s.get('skipped', 0)}"
+            return text + (f"  ⏹ {s['stopped']}" if s.get("stopped") else "")
+        if job["status"] == "error" and job.get("message"):
+            return "❌ " + job["message"]
+        return self.QUEUE_TEXT.get(job["status"], job["status"])
+
+    def _refresh_queue(self, select: int | None = None):
+        t = self.queue_table
+        t.setRowCount(len(self.queue_jobs))
+        sc = STATUS_COLORS[self.mode]
+        for i, job in enumerate(self.queue_jobs):
+            name = Path(job["path"]).name
+            vals = [str(i + 1), f"{name} › {job['sheet']}", job["voice"].get("local_name", ""),
+                    f"{len(job['indices'])}" + (f" (STT {job['rows']})" if job["rows"] else ""),
+                    {"both": "MP3+MP4"}.get(job["fmt"], job["fmt"].upper()), job["out_dir"],
+                    self._queue_status_text(job)]
+            tips = ["", job["path"], f"{job['voice'].get('provider')} • {job['model']} • {job['speed']:.2f}×",
+                    "", "", job["out_dir"], job.get("message", "")]
+            for c, val in enumerate(vals):
+                it = QTableWidgetItem(val)
+                if tips[c]:
+                    it.setToolTip(tips[c])
+                if c in (0, 3, 4):
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if c == 6:
+                    st = job["status"]
+                    if st == "done":
+                        st = "warn" if (job.get("summary") or {}).get("error") else "ok"
+                    it.setForeground(QColor(sc.get(st, sc["pending"])))
+                    f = it.font()
+                    f.setBold(st in ("running", "done", "error"))
+                    it.setFont(f)
+                t.setItem(i, c, it)
+        if select is not None and 0 <= select < len(self.queue_jobs):
+            t.selectRow(select)
+        self._sync_queue_buttons()
+
+    def queue_add(self):
+        if self._busy_batch():
+            return
+        job = self._batch_job()
+        if not job:
+            return
+        job["status"] = "pending"
+        self.queue_jobs.append(job)
+        self._refresh_queue(select=len(self.queue_jobs) - 1)
+        self.log(f"➕ Hàng chờ #{len(self.queue_jobs)}: {Path(job['path']).name} › {job['sheet']} — "
+                 f"{len(job['indices'])} dòng, {job['voice'].get('local_name')}, {job['fmt'].upper()} → {job['out_dir']}")
+
+    def _busy_batch(self) -> bool:
+        if (self.batch_worker and self.batch_worker.isRunning()) or self._queue_running():
+            QMessageBox.information(self, "Đang chạy", "Hãy chờ lượt chạy hiện tại xong (hoặc bấm ⏹ Dừng).")
+            return True
+        return False
+
+    def queue_move(self, step: int):
+        i = self.queue_table.currentRow()
+        j = i + step
+        if self._queue_running() or not (0 <= i < len(self.queue_jobs)) or not (0 <= j < len(self.queue_jobs)):
+            return
+        self.queue_jobs[i], self.queue_jobs[j] = self.queue_jobs[j], self.queue_jobs[i]
+        self._refresh_queue(select=j)
+
+    def queue_remove(self):
+        i = self.queue_table.currentRow()
+        if self._queue_running() or not (0 <= i < len(self.queue_jobs)):
+            return
+        job = self.queue_jobs.pop(i)
+        self._refresh_queue(select=min(i, len(self.queue_jobs) - 1))
+        self.log(f"🗑 Đã xoá khỏi hàng chờ: {Path(job['path']).name}")
+
+    def queue_clear(self):
+        if self._queue_running() or not self.queue_jobs:
+            return
+        if QMessageBox.question(self, "Xoá hàng chờ", f"Xoá cả {len(self.queue_jobs)} file khỏi hàng chờ?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self.queue_jobs.clear()
+        self._refresh_queue()
+
+    def queue_open_folder(self):
+        i = self.queue_table.currentRow()
+        if 0 <= i < len(self.queue_jobs):
+            self.open_folder(self.queue_jobs[i]["out_dir"])
+
+    def run_queue(self):
+        if self._busy_batch():
+            return
+        if not self.queue_jobs:
+            QMessageBox.information(self, "Hàng chờ trống", "Hãy bấm ➕ để thêm ít nhất 1 file vào hàng chờ.")
+            return
+        for prov in dict.fromkeys(job["voice"]["provider"] for job in self.queue_jobs):
+            if not self._provider_ready(prov):
+                return
+        for job in self.queue_jobs:
+            job.update(status="pending", summary=None, message="")
+        self._queue_stop = False
+        self.queue_pos = 0
+        self.log(f"📋 Bắt đầu hàng chờ: {len(self.queue_jobs)} file.")
+        self._queue_start(0)
+
+    def _queue_start(self, pos: int):
+        self.queue_pos = pos
+        job = self.queue_jobs[pos]
+        job["status"] = "running"
+        self._refresh_queue(select=pos)
+        self.log(f"📋 Hàng chờ {pos + 1}/{len(self.queue_jobs)}: {Path(job['path']).name}")
+        try:
+            Path(job["out_dir"]).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            job.update(status="error", message=f"Không tạo được thư mục: {exc}")
+            self.log(f"❌ {job['message']}")
+            self._queue_next()
+            return
+        self._run_batch_job(job)
+
+    def _queue_next(self):
+        pos = self.queue_pos
+        if not self._queue_stop and pos is not None and pos + 1 < len(self.queue_jobs):
+            self._queue_start(pos + 1)
+            return
+        self._queue_finish()
+
+    def _queue_finish(self):
+        self.queue_pos = None
+        for job in self.queue_jobs:
+            if job["status"] in ("pending", "running"):
+                job["status"] = "stopped"
+        self._refresh_queue()
+        self.batch_retry.setEnabled(False)       # the table holds the last queued file: retry it from the queue instead
+        jobs = self.queue_jobs
+        ok = sum((j.get("summary") or {}).get("ok", 0) for j in jobs)
+        err = sum((j.get("summary") or {}).get("error", 0) for j in jobs)
+        skipped = sum((j.get("summary") or {}).get("skipped", 0) for j in jobs)
+        done = sum(j["status"] == "done" for j in jobs)
+        head = "⏹ Hàng chờ đã dừng" if self._queue_stop else "🎉 Hàng chờ hoàn tất"
+        msg = f"{done}/{len(jobs)} file • Thành công {ok} • Lỗi {err} • Bỏ qua {skipped}"
+        self.batch_status.setText(f"{head}: {msg}")
+        self.log(("⏹ " if self._queue_stop else "✅ ") + f"Hàng chờ xong — {msg}")
+        if not self._queue_stop:
+            lines = "\n".join(f"{i}. {Path(j['path']).name}: {self._queue_status_text(j)}\n    → {j['out_dir']}"
+                              for i, j in enumerate(jobs, 1))
+            QMessageBox(QMessageBox.Icon.Information, "Hoàn tất hàng chờ", f"{msg}\n\n{lines}", parent=self).exec()
 
     # ================================================================ video
     def _pick_video_image(self):
@@ -3476,6 +3739,7 @@ class MainWindow(QMainWindow):
                                     "Vẫn còn tác vụ đang chạy. Dừng lại và thoát?") != QMessageBox.StandardButton.Yes:
                 e.ignore()
                 return
+            self._queue_stop = True              # do not start the next queued file while closing
             for w in running:
                 w.cancel()
             for w in running:

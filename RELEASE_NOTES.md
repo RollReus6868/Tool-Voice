@@ -1,20 +1,22 @@
-## TTS Clone Studio 3.1.1
+## TTS Clone Studio 3.2.0
 
-### Sửa lỗi
-- **OmniVoice đọc thêm một tiếng lạ (ví dụ "ten de") ở đầu mỗi câu/cụm.** Nguyên nhân: file mẫu dùng để clone giọng bị cắt **giữa lúc đang nói** (ví dụ "…a exten|"). Model tưởng phần cuối chưa được nói nên đọc bù nó ở đầu **mỗi lần tạo** — khi bật ⏸ Khoảng nghỉ giữa câu, mỗi cụm là một lần tạo nên tiếng này lặp lại ở mọi chỗ ngắt.
-  - Khi clone giọng OmniVoice, app tự phát hiện mẫu bị cắt giữa lúc nói, **cắt về chỗ nghỉ gần nhất** (giữ ít nhất 3 giây) và chép lại lời thoại mẫu bằng Whisper cho khớp. Mẫu không có chỗ nghỉ để cắt thì app cảnh báo.
-  - Giọng đã tạo từ trước bằng mẫu bị cắt: khi đọc, nhật ký hiện cảnh báo kèm cách sửa.
+### Mới: 📋 Hàng chờ nhiều file Excel (trang 📊 Hàng loạt)
+Chạy nhiều file Excel một lần, mỗi file một cài đặt và một thư mục lưu riêng.
 
-### Cách sửa giọng đang bị lỗi
-1. Trang **🧬 Clone giọng** › nhà cung cấp **OmniVoice**.
-2. Chọn lại file mẫu (file gốc, hoặc file `.wav` của giọng mà nhật ký cảnh báo chỉ ra).
-3. **Để trống ô lời thoại mẫu**, đặt tên rồi bấm **Bắt đầu Clone** — app tự cắt về chỗ nghỉ và chép lời.
-4. Dùng giọng mới, xoá giọng cũ.
+1. Chọn file Excel, sheet, cột, (nếu cần) **Chỉ chạy STT**, giọng, model, tốc độ, định dạng, thư mục lưu… như bình thường.
+2. Bấm **➕ Thêm vào hàng chờ**. File được thêm cùng **toàn bộ cài đặt lúc đó** (kể cả tùy chọn giọng Inworld/OmniVoice, khoảng nghỉ, cài đặt video, số luồng, bỏ qua/gộp file).
+3. Chọn file tiếp theo, đổi cài đặt và thư mục tuỳ ý, bấm **➕** lần nữa. Đổi cài đặt ở trên sau khi thêm **không** ảnh hưởng file đã nằm trong hàng chờ.
+4. Bấm **▶ Chạy hàng chờ**: các file chạy lần lượt, bảng bên dưới hiện tiến độ của file đang chạy, cột *Trạng thái* của hàng chờ hiện kết quả từng file (✅ thành công • ❌ lỗi • ⏭ bỏ qua). Xong sẽ có một bảng tổng kết.
+
+- **⏹ Dừng** dừng file đang chạy và không chạy tiếp các file sau.
+- **⬆ ⬇** đổi thứ tự, **🗑 Xoá mục**, **🧹 Xoá hết**, **📂 Mở thư mục** của từng file.
+- Bấm **▶ Chạy hàng chờ** lần nữa sẽ chạy lại cả hàng chờ; bật **Bỏ qua dòng đã có file** lúc thêm để chỉ làm nốt các dòng còn thiếu/lỗi.
+- Hàng chờ nằm trong bộ nhớ: tắt app thì hàng chờ mất (file đã tạo vẫn còn).
 
 ### Tải bản nào?
 | Máy | File |
 |---|---|
-| Windows (khuyên dùng) | `TTSCloneStudio-3.1.1-windows-setup.exe` |
-| Windows, không muốn cài | `TTSCloneStudio-3.1.1-windows-portable.exe` |
+| Windows (khuyên dùng) | `TTSCloneStudio-3.2.0-windows-setup.exe` |
+| Windows, không muốn cài | `TTSCloneStudio-3.2.0-windows-portable.exe` |
 
-Bản 3.1.1 **chỉ có Windows**; máy Mac tiếp tục dùng 3.1.0 (bản Mac sẽ có ở lần phát hành sau). Windows đang dùng bản 2.1 trở lên thì không cần tải: app sẽ hiện nút **⬆ Có bản mới** và tự cài.
+Bản 3.2.0 **chỉ có Windows**; máy Mac tiếp tục dùng 3.1.0. Windows đang dùng bản 2.1 trở lên thì không cần tải: app sẽ hiện nút **⬆ Có bản mới** và tự cài.
