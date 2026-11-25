@@ -687,6 +687,8 @@ class MainWindow(QMainWindow):
         og.addWidget(self.tts_format, 2, 1)
         og.addWidget(button("🎬 Ảnh nền, khung hình video…", size="small", tint="pink",
                             slot=lambda: self.go(PAGE_VIDEO)), 3, 1)
+        self.tts_timings = self._timings_box(short=True)
+        og.addWidget(self.tts_timings, 4, 1)
         og.setColumnStretch(1, 1)
         out.add(og)
         right.addWidget(out)
@@ -798,6 +800,8 @@ class MainWindow(QMainWindow):
         cg.addWidget(label("🛠 Tùy chọn", role="field"), 4, 0)
         cg.addLayout(opts, 4, 1, 1, 3)
         cg.addWidget(self.batch_merge, 5, 1, 1, 3)
+        self.batch_timings = self._timings_box()
+        cg.addWidget(self.batch_timings, 6, 1, 1, 3)
         cg.setColumnStretch(1, 1)
         cfg.add(cg)
         cfg.add(self._iw_options_box("batch", self.batch_model))
@@ -2137,7 +2141,9 @@ class MainWindow(QMainWindow):
                    "bật <b>🔗 Gộp</b> để có thêm 1 file tổng. Chỉ muốn chạy vài dòng? Gõ vào <b>🔢 Chỉ chạy STT</b>, "
                    "ví dụ <code>1-10, 15, 20-</code> (số STT ở cột đầu bảng). Nhiều file Excel một lần: chọn file + giọng + "
                    "thư mục rồi bấm <b>➕ Thêm vào hàng chờ</b>, lặp lại cho từng file (mỗi file giữ cài đặt riêng), "
-                   "rồi bấm <b>▶ Chạy hàng chờ</b>.")
+                   "rồi bấm <b>▶ Chạy hàng chờ</b>. Làm video bằng CapCut Draft Studio? Để bật "
+                   "<b>⏱ Ghi mốc thời gian từng từ</b>: MP3 mang theo lúc từng từ được đọc nên đồ họa chữ hiện "
+                   "đúng lúc giọng nói tới.")
             + f"<p style='color:{c['violet']}'><b>📈 Mức dùng Inworld:</b> Inworld không cho app đọc số dư, nên ở trang "
               "<b>Mức dùng</b> bấm <b>🔄 Đồng bộ với Inworld</b> và chép vào: số dư ở trang <b>Billing</b>, số ký tự "
               "(tổng và từng model) ở trang <b>Usage</b>. App lấy đúng số đó làm mốc, tự cộng mỗi lần đọc sau đó, vẽ "
@@ -2269,6 +2275,10 @@ class MainWindow(QMainWindow):
         self.batch_threads.setValue(int(c.get("batch_threads", 2) or 2))
         self.batch_skip.setChecked(bool(c.get("batch_skip_existing", True)))
         self.batch_merge.setChecked(bool(c.get("batch_merge_all", False)))
+        for box in (self.tts_timings, self.batch_timings):
+            box.blockSignals(True)
+            box.setChecked(bool(c.get("word_timings", True)))
+            box.blockSignals(False)
         self.iw_auto_sync.blockSignals(True)
         self.iw_auto_sync.setChecked(bool(c.get("inworld_auto_sync", True)))
         self.iw_auto_sync.blockSignals(False)
@@ -2301,6 +2311,25 @@ class MainWindow(QMainWindow):
 
     def _secrets(self):
         return {"inworld_api_key": self.iw_key.text().strip() or self.secret_store.get("inworld_api_key")}
+
+    def _timings_box(self, short: bool = False) -> QCheckBox:
+        box = QCheckBox("⏱ Ghi mốc từng từ (cho CapCut)" if short else
+                        "⏱ Ghi mốc thời gian từng từ vào MP3 (cho CapCut Draft Studio)")
+        box.setToolTip("CapCut Draft Studio đọc mốc này để đồ họa chữ hiện đúng lúc giọng nói tới.\n"
+                       "Inworld: máy chủ trả sẵn, không tốn thêm phí.\n"
+                       "OmniVoice: Whisper nghe lại file vừa tạo (chậm thêm vài giây mỗi file; "
+                       "lần đầu tải model ~1,6 GB).\nMốc nằm ngay trong file MP3 — chép MP3 đi đâu cũng mang theo.")
+        box.setChecked(bool(self.config.get("word_timings", True)))
+        box.toggled.connect(self._set_timings)
+        return box
+
+    def _set_timings(self, on: bool) -> None:
+        self.config = self.config_store.save({"word_timings": bool(on)})
+        for box in (getattr(self, "tts_timings", None), getattr(self, "batch_timings", None)):
+            if box is not None and box.isChecked() != bool(on):
+                box.blockSignals(True)
+                box.setChecked(bool(on))
+                box.blockSignals(False)
 
     def _live_config(self) -> dict:
         cfg = dict(self.config)

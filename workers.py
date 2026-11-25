@@ -11,6 +11,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+import timings
 from media import make_video, merge_audio_files, probe_duration
 from providers import CancelledError, build_provider
 
@@ -75,10 +76,17 @@ def produce_outputs(
             # chunks already synthesized were billed even if a later one failed
             exc.chars_billed = getattr(provider, "chars_used", 0)
             raise
+        n_timed = 0
+        words = getattr(provider, "word_timings", None)
+        if words:
+            if timings.embed(audio_path, words, getattr(provider, "timings_engine", "") or "tts"):
+                n_timed = len(words)
+            else:
+                log("⚠ Không ghi được mốc thời gian từng từ vào MP3 — CapCut Draft Studio sẽ tự ước lượng.")
         if progress:
             progress(60 if want_mp4 else 100)
         result = {"mp3": final_mp3 if want_mp3 else None, "mp4": None, "audio": audio_path,
-                  "chars": int(getattr(provider, "chars_used", 0) or 0)}
+                  "chars": int(getattr(provider, "chars_used", 0) or 0), "timings": n_timed}
         if want_mp4:
             if cancelled():
                 raise CancelledError("Đã dừng theo yêu cầu.")
@@ -158,6 +166,8 @@ class BatchWorker(QThread):
             detail = " + ".join(Path(p).name for p in (res["mp3"], res["mp4"]) if p)
             if dur:
                 detail += f"  ({dur:.1f}s)"
+            if res.get("timings"):
+                detail += "  ⏱"
             self.row_status.emit(idx, "ok", detail)
             self.log.emit(f"✅ Dòng {task['row_no']} → {detail}")
             return "ok", res["audio"]

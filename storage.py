@@ -85,6 +85,8 @@ DEFAULT_CONFIG = {
     "ui_style": "classic",           # classic | youwee
     "ui_theme": "ocean",             # Youwee colour theme, see theme.YOUWEE_THEMES
     "ov_hardware": "auto",           # OmniVoice install: auto | cuda | cpu   (generation settings: ov_*, see omni.py)
+    # 3.3
+    "word_timings": True,            # write word timings into the MP3 for CapCut Draft Studio (timings.py)
 }
 
 DEFAULTS_REV = 3

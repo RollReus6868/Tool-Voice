@@ -12,7 +12,8 @@ from typing import Callable
 import requests
 
 import omni
-from media import merge_audio_files, to_wav, wav_to_mp3
+import timings
+from media import merge_audio_files, probe_duration, to_wav, wav_to_mp3
 from omni import CancelledError, ProviderError   # defined in omni.py; re-exported for the rest of the app
 from utils import split_text
 
@@ -99,6 +100,11 @@ class BaseProvider:
         self.cancel = cancel or (lambda: False)
         self.session = requests.Session()
         self.chars_used = 0          # characters billed by the provider (reported or counted)
+        # 3.3: word timings for CapCut Draft Studio (see timings.py)
+        self.want_timings = False    # ask for / compute them
+        self.word_timings: list | None = None   # [[word, start, end]] of the last synthesize()
+        self.timings_engine = ""
+        self._chunk_words: list | None = None   # set by synth_chunk when the API returned timings
 
     def _check_cancel(self):
         if self.cancel():
@@ -169,12 +175,16 @@ class BaseProvider:
         chunks = split_text(text, self.max_chars)
         if not chunks:
             raise ProviderError("Nội dung văn bản trống.")
+        self.word_timings = None
+        words: list | None = [] if self.want_timings else None
+        offset = 0.0
         with tempfile.TemporaryDirectory(prefix="tts_parts_") as td:
             parts: list[str] = []
             for index, chunk in enumerate(chunks, 1):
                 self._check_cancel()
                 if len(chunks) > 1:
                     self.log(f"   ↳ {self.name}: đoạn {index}/{len(chunks)} ({len(chunk)} ký tự)")
+                self._chunk_words = None
                 audio = self.synth_chunk(chunk, voice_id, model=model, speed=speed, language=language,
                                          options=options)
                 if not audio:
@@ -182,9 +192,18 @@ class BaseProvider:
                 part = Path(td) / f"part_{index:04d}.mp3"
                 part.write_bytes(audio)
                 parts.append(str(part))
+                if words is not None:
+                    if not self._chunk_words:
+                        words = None             # one chunk without timings: none for the file
+                    else:
+                        words += timings.shift(self._chunk_words, offset)
+                        if len(chunks) > 1:
+                            offset += probe_duration(str(part)) or 0.0
             tmp_out = output_path + ".part"
             merge_audio_files(parts, tmp_out)
             os.replace(tmp_out, output_path)
+        if words:
+            self.word_timings = words
         return output_path
 
 
@@ -224,6 +243,9 @@ class InworldProvider(BaseProvider):
             raise ProviderError(f"Inworld không trả voiceId: {str(data)[:300]}")
         return voice_id
 
+    # models that answered 400 to timestampType (shared: a batch builds one provider per row)
+    _ts_refused: set[str] = set()
+
     OPTION_FIELDS = ("deliveryMode", "temperature", "enhanceGeneration", "instruction")
 
     @staticmethod
@@ -259,23 +281,40 @@ class InworldProvider(BaseProvider):
         lang = normalize_language("Inworld", language)
         if lang:
             payload["language"] = lang
+        if self.want_timings and model not in self._ts_refused:
+            payload["timestampType"] = "WORD"     # exact word timings for CapCut Draft Studio
         extras = [k for k in self.OPTION_FIELDS if k in payload]
+        url = f"{self.base_url}/tts/v1/voice"
         try:
-            data = self._request("POST", f"{self.base_url}/tts/v1/voice",
-                                 headers=self.headers, json=payload, timeout=180)
+            data = self._request("POST", url, headers=self.headers, json=payload, timeout=180)
         except ProviderError as exc:
-            # A model that does not accept one of the style options answers 400:
+            # A model that does not accept one of the style options (or word timings) answers 400:
             # read the text plainly instead of failing the whole job.
-            if not extras or not str(exc).startswith("HTTP 400"):
+            if not str(exc).startswith("HTTP 400") or not (extras or "timestampType" in payload):
                 raise
-            for k in extras:
-                payload.pop(k, None)
-            self.log(f"⚠ {model} không nhận tùy chọn {', '.join(extras)} — đọc lại với thiết lập mặc định.")
-            data = self._request("POST", f"{self.base_url}/tts/v1/voice",
-                                 headers=self.headers, json=payload, timeout=180)
+            data = None
+            if extras:
+                for k in extras:
+                    payload.pop(k, None)
+                self.log(f"⚠ {model} không nhận tùy chọn {', '.join(extras)} — đọc lại với thiết lập mặc định.")
+                try:
+                    data = self._request("POST", url, headers=self.headers, json=payload, timeout=180)
+                except ProviderError as exc2:
+                    if not str(exc2).startswith("HTTP 400") or "timestampType" not in payload:
+                        raise
+            if data is None:
+                payload.pop("timestampType", None)
+                self._ts_refused.add(model)
+                self.log(f"⚠ {model} không trả mốc thời gian từng từ — đọc bình thường "
+                         "(CapCut Draft Studio sẽ tự ước lượng).")
+                data = self._request("POST", url, headers=self.headers, json=payload, timeout=180)
         audio = data.get("audioContent") or (data.get("result") or {}).get("audioContent")
         if not audio:
             raise ProviderError(f"Inworld không trả audioContent: {str(data)[:300]}")
+        if self.want_timings:
+            self._chunk_words = timings.inworld_words(data) or None
+            if self._chunk_words:
+                self.timings_engine = "inworld"
         used = (data.get("usage") or {}).get("processedCharactersCount")
         self.chars_used += int(used) if isinstance(used, (int, float)) and used > 0 else len(text)
         return base64.b64decode(audio)
@@ -380,10 +419,40 @@ class OmniVoiceProvider(BaseProvider):
         self.max_chars = 10 ** 9 if fixed else type(self).max_chars
         pieces = omni.split_pauses(text, o) if o.get("pause_enabled") and not fixed else []
         if len(pieces) > 1:
-            return self._synthesize_paused(pieces, voice_id, output_path, model=model, speed=speed,
-                                           language=language, options=o)
-        return super().synthesize(text, voice_id, output_path, model=model, speed=speed, language=language,
-                                  options=options)
+            out = self._synthesize_paused(pieces, voice_id, output_path, model=model, speed=speed,
+                                          language=language, options=o)
+        else:
+            out = super().synthesize(text, voice_id, output_path, model=model, speed=speed, language=language,
+                                     options=options)
+        self.word_timings = None
+        if self.want_timings:
+            self._align(out, text, model)
+        return out
+
+    def _align(self, audio_path: str, text: str, model: str) -> None:
+        """Word timings by Whisper. Never fails the row: without them CapCut Draft Studio estimates."""
+        try:
+            self._check_cancel()
+            self.log(f"   ⏱ {self.name}: Whisper dò mốc thời gian từng từ (cho CapCut Draft Studio)…")
+            with tempfile.TemporaryDirectory(prefix="tts_align_") as td:
+                wav = str(Path(td) / "a.wav")
+                to_wav(audio_path, wav, rate=16000)
+                res = self._ask({"cmd": "align", "audio": wav, "text": text}, model)
+            words = []
+            for item in res.get("words") or []:
+                try:
+                    w, s, e = item[0], float(item[1]), float(item[2])
+                except (IndexError, TypeError, ValueError):
+                    continue
+                if str(w).strip():
+                    words.append([str(w).strip(), round(s, 3), round(max(s, e), 3)])
+            if words:
+                self.word_timings = words
+                self.timings_engine = "whisper"
+        except CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"⚠ Không dò được mốc thời gian từng từ ({exc}) — CapCut Draft Studio sẽ tự ước lượng.")
 
     def _warn_cut_sample(self, voice_id: str) -> None:
         """Voices cloned before 3.2 may come from a sample cut mid-speech: say so once per run."""
@@ -467,10 +536,13 @@ def _silence(params, seconds: float) -> bytes:
 def build_provider(provider_name: str, secrets: dict, config: dict, log: LogFn = None,
                    cancel: CancelFn = None) -> BaseProvider:
     if provider_name == "OmniVoice":
-        return OmniVoiceProvider(config, log=log, cancel=cancel)
-    if provider_name != "Inworld":
+        p: BaseProvider = OmniVoiceProvider(config, log=log, cancel=cancel)
+    elif provider_name != "Inworld":
         raise ProviderError(f"Nhà cung cấp “{provider_name}” không còn được hỗ trợ.")
-    key = (secrets.get("inworld_api_key") or "").strip()
-    if not key:
-        raise ProviderError("Chưa nhập Inworld API key (mục ⚙ Cài đặt).")
-    return InworldProvider(key, config.get("inworld_base_url", ""), log=log, cancel=cancel)
+    else:
+        key = (secrets.get("inworld_api_key") or "").strip()
+        if not key:
+            raise ProviderError("Chưa nhập Inworld API key (mục ⚙ Cài đặt).")
+        p = InworldProvider(key, config.get("inworld_base_url", ""), log=log, cancel=cancel)
+    p.want_timings = bool(config.get("word_timings", True))
+    return p

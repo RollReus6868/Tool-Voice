@@ -28,7 +28,7 @@ datas += collect_data_files("imageio_ffmpeg", include_py_files=False)
 datas += collect_data_files("certifi")
 
 hiddenimports = collect_submodules("keyring.backends") + [
-    "main", "dialogs", "widgets", "theme", "media", "providers", "storage", "utils", "workers",
+    "main", "dialogs", "widgets", "theme", "media", "providers", "storage", "utils", "workers", "timings",
     "updater", "app_info", "selfcheck", "usage", "omni",
 ]
 if IS_WIN:

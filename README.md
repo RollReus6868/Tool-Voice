@@ -1,4 +1,4 @@
-# 🎙 TTS Clone Studio 3.2
+# 🎙 TTS Clone Studio 3.3
 
 Ứng dụng **Windows & macOS**: **clone giọng nói → đọc văn bản → xuất MP3 / MP4**, chạy lẻ hoặc hàng loạt từ file Excel.
 Hai cách tạo giọng: **Inworld** (API chính thức, trả phí theo ký tự) và **OmniVoice** (miễn phí, chạy ngay trên máy bạn, 600+ ngôn ngữ). **Tự cập nhật** qua GitHub Releases.
@@ -74,6 +74,7 @@ Dòng đầu là tiêu đề. Ví dụ (bấm **📥 Tạo file Excel mẫu** đ
 - **Gộp tất cả thành 1 file**: tạo thêm `TenExcel_GOP.mp3/.mp4` theo thứ tự dòng.
 - **Số luồng**: 2–3 là an toàn; cao quá dễ bị nhà cung cấp giới hạn tốc độ. Với OmniVoice máy đọc lần lượt từng dòng, nhiều luồng không nhanh hơn.
 - **🔁 Chạy lại dòng lỗi**: chỉ chạy lại các dòng lỗi.
+- **⏱ Ghi mốc thời gian từng từ vào MP3** (mặc định bật, 3.3): mỗi MP3 mang theo lúc từng từ được đọc để **CapCut Draft Studio 0.6.3+** cho đồ họa chữ hiện đúng lúc giọng nói tới. Inworld trả sẵn (không thêm phí); OmniVoice dùng Whisper nghe lại file (chậm thêm vài giây mỗi file, lần đầu tải ~1,6 GB). Mốc nằm trong file MP3 (thẻ ID3 `WORD_TIMINGS`), âm thanh không đổi — chép MP3 đi đâu cũng mang theo. Dòng có mốc hiện dấu ⏱ trong bảng kết quả.
 - **📋 Hàng chờ nhiều file Excel**: chọn file + giọng + thư mục lưu rồi bấm **➕ Thêm vào hàng chờ**; lặp lại cho file khác. Mỗi file giữ nguyên cài đặt lúc thêm (sheet, cột, STT, giọng, model, tốc độ, tùy chọn giọng, định dạng, video, số luồng, gộp, thư mục). **▶ Chạy hàng chờ** chạy lần lượt từng file; **⏹ Dừng** dừng cả hàng chờ. Có ⬆ ⬇ đổi thứ tự, 🗑 xoá, 📂 mở thư mục của từng file. Chạy lại hàng chờ với **Bỏ qua dòng đã có file** để chỉ làm nốt các dòng còn thiếu.
 
 ### Giọng mẫu để clone

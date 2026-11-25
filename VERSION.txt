@@ -1,4 +1,7 @@
-TTS Clone Studio 3.2.0
+TTS Clone Studio 3.3.0
+
+3.3.0
+- Ghi moc thoi gian tung tu vao file MP3 (Inworld tra san, OmniVoice dung Whisper) de CapCut Draft Studio 0.6.3+ cho do hoa chu hien dung luc giong noi toi
 
 3.2.0
 - Hang loat Excel: hang cho nhieu file Excel, moi file giu cai dat va thu muc luu rieng, chay lan luot

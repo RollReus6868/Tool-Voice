@@ -12,6 +12,8 @@ Requests ("model" = HuggingFace repo id or a local checkpoint folder, loaded on 
     {"cmd": "load", "model": m}
     {"cmd": "prompt", "model": m, "audio": wav, "ref_text": str|null, "preprocess": bool, "out": file}
     {"cmd": "transcribe", "model": m, "audio": wav}
+    {"cmd": "align", "model": m, "audio": wav, "text": str}  -> {"words": [[word, start, end]], "seconds": s}
+        Whisper word timestamps of a finished file (3.3: CapCut Draft Studio syncs text graphics to them)
     {"cmd": "tts", "model": m, "text": str, "out": wav, "language": str|null, "prompt": file|null,
      "instruct": str|null, "speed": float?, "duration": float?, "normalize_text": bool, "config": {...}}
 
@@ -117,6 +119,33 @@ def do_transcribe(req: dict) -> dict:
     return {"text": model.transcribe((load_audio(req["audio"], model.sampling_rate), model.sampling_rate))}
 
 
+def do_align(req: dict) -> dict:
+    """When every word of `audio` is spoken, by Whisper (the same ASR the clone step uses)."""
+    import numpy as np
+    from omnivoice.utils.audio import load_audio
+
+    model = ensure_model(req.get("model"))
+    if getattr(model, "_asr_pipe", None) is None:
+        say("📝 Đang nạp Whisper (lần đầu phải tải ~1,6 GB)…")
+        model.load_asr_model()
+    rate = 16000
+    wav = np.squeeze(load_audio(req["audio"], rate)).astype("float32")
+    seconds = len(wav) / float(rate)
+    kw: dict = {"return_timestamps": "word"}
+    if seconds > 29.0:
+        kw["chunk_length_s"] = 30          # Whisper hears 30 s at a time; the pipeline stitches the pieces
+    out = model._asr_pipe({"array": wav, "sampling_rate": rate}, **kw)
+    words = []
+    for c in out.get("chunks") or []:
+        start, end = (list(c.get("timestamp") or ()) + [None, None])[:2]
+        text = str(c.get("text") or "").strip()
+        if start is None or not text:
+            continue
+        end = start if end is None else end
+        words.append([text, round(float(start), 3), round(max(float(start), float(end)), 3)])
+    return {"words": words, "seconds": round(seconds, 3)}
+
+
 def do_tts(req: dict) -> dict:
     import soundfile as sf
     from omnivoice import OmniVoiceGenerationConfig
@@ -167,6 +196,15 @@ def fake(req: dict) -> dict:
         return {"ref_text": req.get("ref_text") or "lời thoại do máy chép", "echo": req}
     if cmd == "transcribe":
         return {"text": "lời thoại do máy chép", "echo": req}
+    if cmd == "align":
+        if "ALIGNFAIL" in (req.get("text") or ""):
+            raise RuntimeError("Giả lập lỗi Whisper")
+        with wave.open(req["audio"], "rb") as w:
+            seconds = w.getnframes() / float(w.getframerate())
+        toks = (req.get("text") or "").split() or ["(im lặng)"]
+        step = seconds / len(toks)
+        words = [[t, round(i * step, 3), round((i + 1) * step, 3)] for i, t in enumerate(toks)]
+        return {"words": words, "seconds": round(seconds, 3), "echo": req}
     if cmd == "tts":
         if "LỖI" in req["text"]:
             raise RuntimeError("Giả lập lỗi bộ máy")
@@ -189,6 +227,8 @@ def handle(req: dict) -> dict:
         return do_prompt(req)
     if cmd == "transcribe":
         return do_transcribe(req)
+    if cmd == "align":
+        return do_align(req)
     if cmd == "tts":
         return do_tts(req)
     raise ValueError(f"unknown cmd {cmd!r}")

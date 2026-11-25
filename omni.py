@@ -731,7 +731,7 @@ class Engine:
                     self._log(str(msg.get("text", "")))
                     continue
                 if msg.get("ok"):
-                    if req.get("cmd") in ("load", "tts", "prompt", "transcribe"):
+                    if req.get("cmd") in ("load", "tts", "prompt", "transcribe", "align"):
                         self.model = req.get("model", "")
                     if msg.get("device"):
                         self.device = msg["device"]
